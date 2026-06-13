@@ -1,254 +1,323 @@
 name: Build GLM
+
 on: workflow_dispatch
+
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      
+      - name: Create app structure
+        run: |
           set -ex
           mkdir -p Payload/GLM.app
+          
+      - name: Write theme.js (Dynamic Status Bar)
+        run: |
+          cat > Payload/GLM.app/theme.js <<'THEMEEOF'
+          (function(){
+            function g(){
+              var s=['header','nav','[class*=header]','.app-header','.navbar','[class*=topbar]','[class*=app-bar]','[role=banner]','[class*=toolbar]','#header'];
+              for(var i=0;i<s.length;i++){
+                var e=document.querySelector(s[i]);
+                if(e){
+                  var r=e.getBoundingClientRect();
+                  if(r.top<=5&&r.height>20){
+                    var c=getComputedStyle(e).backgroundColor;
+                    var m=c.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+                    if(m&&c!=='rgba(0, 0, 0, 0)'&&c!=='transparent')return m[1]+','+m[2]+','+m[3];
+                  }
+                }
+              }
+              var b=document.body,ht=document.documentElement;
+              while(b&&b!==ht){
+                var cs=getComputedStyle(b);
+                var bc=cs.backgroundColor;
+                if(bc&&bc!=='rgba(0, 0, 0, 0)'&&bc!=='transparent'){
+                  var mx=bc.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+                  if(mx)return mx[1]+','+mx[2]+','+mx[3];
+                }
+                b=b.parentElement;
+              }
+              var cv=getComputedStyle(ht).getPropertyValue('--background');
+              if(cv){
+                var mv=cv.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+                if(mv)return mv[1]+','+mv[2]+','+mv[3];
+              }
+              return '255,255,255';
+            }
+            var lc='',sc=0;
+            var obs=new MutationObserver(function(){
+              var nc=g();
+              if(nc===lc){sc++;if(sc>=2){window.webkit.messageHandlers.themeHandler.postMessage(nc);sc=0}}else{lc=nc;sc=1}
+            });
+            obs.observe(document.documentElement,{attributes:true,childList:true,subtree:true});
+            var htmlObs=new MutationObserver(function(){window.webkit.messageHandlers.themeHandler.postMessage(g())});
+            htmlObs.observe(document.documentElement,{attributes:true});
+            function sendColor(){var c=g();window.webkit.messageHandlers.themeHandler.postMessage(c)}
+            sendColor();
+            setInterval(sendColor,400);
+          })();
+          THEMEEOF
 
-          cat > app.swift <<'SWIFT_EOF'
+      - name: Write patches.js (ES2020+ Polyfills)
+        run: |
+          cat > Payload/GLM.app/patches.js <<'PATCHEOF'
+          (function(){
+            // 1. patchFetch
+            var _nativeFetch=window.fetch.bind(window);
+            function _cleanFetch(url,opts){
+              if(opts&&opts.headers){
+                if(opts.headers instanceof Headers){opts.headers.delete("traceparent");opts.headers.delete("tracestate")}
+                else if(typeof opts.headers==="object"&&!Array.isArray(opts.headers)){delete opts.headers.traceparent;delete opts.headers.tracestate}
+              }
+              return _nativeFetch(url,opts);
+            }
+            Object.defineProperty(window,"fetch",{configurable:false,enumerable:true,get:function(){return _cleanFetch},set:function(){}});
+            
+            // 2. patchAnimate
+            function sanitizeOptions(o){if(typeof o!=="object"||o===null)return o;var c=Object.assign({},o);if(typeof c.easing==="string")c.easing="linear";delete c.composite;delete c.pseudoElement;delete c.iterationComposite;return c}
+            function noopAnimation(){
+              var noop=function(){};
+              var rf=function(){};
+              var finished=new Promise(function(r){rf=r});
+              var anim={finished:finished,ready:finished,playState:"finished",currentTime:0,startTime:0,playbackRate:1,pending:false,replaceState:"active",timeline:null,effect:null,id:"",onfinish:null,oncancel:null,onremove:null,play:noop,pause:noop,finish:noop,cancel:noop,reverse:noop,persist:noop,commitStyles:noop,updatePlaybackRate:noop,addEventListener:noop,removeEventListener:noop,dispatchEvent:function(){return false},overallProgress:null};
+              rf(anim);
+              return anim;
+            }
+            if(typeof window!=="undefined"&&typeof Element!=="undefined"){
+              var proto=Element.prototype;
+              var native=proto.animate;
+              if(typeof native==="function"){
+                Object.defineProperty(proto,"animate",{configurable:true,writable:true,value:function(keyframes,options2){
+                  try{return native.call(this,keyframes,options2)}catch{try{return native.call(this,keyframes,sanitizeOptions(options2))}catch{return noopAnimation()}}
+                }});
+              }
+            }
+            
+            // 3. MediaQueryList polyfill
+            (function(w){
+              function getProto(){if(w.MediaQueryList)return w.MediaQueryList.prototype;if(typeof w.matchMedia==="function"){var mql=w.matchMedia("all");return Object.getPrototypeOf(mql)}}
+              var proto=getProto();
+              if(!proto)return;
+              var wrappers=new WeakMap();
+              proto.addEventListener=proto.addEventListener||function(type,listener){
+                if(type!=="change")return;
+                if(typeof listener==="function"){proto.addListener.call(this,listener)}else{var wrapper=wrappers.get(listener);if(!wrapper){wrapper=function(ev){listener.handleEvent(ev)};wrappers.set(listener,wrapper)}proto.addListener.call(this,wrapper)}
+              };
+              proto.removeEventListener=proto.removeEventListener||function(type,listener){
+                if(type!=="change")return;
+                if(typeof listener==="function"){proto.removeListener.call(this,listener)}else{var wrapper=wrappers.get(listener);if(!wrapper)return;proto.removeListener.call(this,wrapper)}
+              };
+            })(window);
+            
+            // 4. BigInt polyfill
+            if(typeof BigInt==="undefined"){window.BigInt=function(v){return Number(v)|0}}
+            
+            // 5. Promise.any
+            if(!Promise.any){Promise.any=function(iterable){return new Promise(function(resolve,reject){var errors=[];var pending=0;for(var item of iterable){pending++;Promise.resolve(item).then(resolve,function(err){errors.push(err);if(--pending===0)reject(new AggregateError(errors,"All promises were rejected"))})}if(pending===0)reject(new AggregateError(errors,"All promises were rejected"))})}}
+            
+            // 6. String.replaceAll
+            if(!String.prototype.replaceAll){String.prototype.replaceAll=function(search,replacement){if(typeof search==="string")return this.split(search).join(replacement);return this.replace(new RegExp(search.source,search.flags.replace("g","")+"g"),replacement)}}
+            
+            // 7. Array.at
+            if(!Array.prototype.at){Array.prototype.at=function(index){if(index<0)index=this.length+index;return this[index]}}
+            
+            // 8. Object.hasOwn
+            if(!Object.hasOwn){Object.hasOwn=function(obj,prop){return Object.prototype.hasOwnProperty.call(obj,prop)}}
+            
+            // 9. Array.toSorted/toReversed/findLast/findLastIndex
+            if(!Array.prototype.toSorted){Array.prototype.toSorted=function(compareFn){return this.slice().sort(compareFn)}}
+            if(!Array.prototype.toReversed){Array.prototype.toReversed=function(){return this.slice().reverse()}}
+            if(!Array.prototype.findLast){Array.prototype.findLast=function(predicate){for(var i=this.length-1;i>=0;i--){if(predicate(this[i],i,this))return this[i]}return undefined}}
+            if(!Array.prototype.findLastIndex){Array.prototype.findLastIndex=function(predicate){for(var i=this.length-1;i>=0;i--){if(predicate(this[i],i,this))return i}return -1}}
+            
+            // 10. Promise.withResolvers
+            if(!Promise.withResolvers){Promise.withResolvers=function(){var resolve,reject;var promise=new Promise(function(res,rej){resolve=res;reject=rej});return{promise:promise,resolve:resolve,reject:reject}}}
+            
+            // 11. WeakRef
+            if(typeof WeakRef==="undefined"){window.WeakRef=function(target){this._target=target};WeakRef.prototype.deref=function(){return this._target}}
+            
+            // 12. FinalizationRegistry
+            if(typeof FinalizationRegistry==="undefined"){window.FinalizationRegistry=function(){};FinalizationRegistry.prototype.register=function(){};FinalizationRegistry.prototype.unregister=function(){}}
+            
+            // 13. structuredClone
+            if(typeof structuredClone==="undefined"){window.structuredClone=function(value){return JSON.parse(JSON.stringify(value))}}
+            
+            // 14. AbortSignal.timeout
+            if(typeof AbortSignal!=="undefined"&&!AbortSignal.timeout){AbortSignal.timeout=function(ms){var controller=new AbortController();setTimeout(function(){controller.abort()},ms);return controller.signal}}
+            
+            // 15. globalThis
+            if(typeof globalThis==="undefined"){window.globalThis=window}
+            
+            // 16. ResizeObserver
+            if(typeof ResizeObserver==="undefined"){window.ResizeObserver=function(callback){this._callback=callback};ResizeObserver.prototype.observe=function(){};ResizeObserver.prototype.unobserve=function(){};ResizeObserver.prototype.disconnect=function(){}}
+            
+            // 17. IntersectionObserver.takeRecords
+            if(typeof IntersectionObserver!=="undefined"&&IntersectionObserver.prototype&&!IntersectionObserver.prototype.takeRecords){IntersectionObserver.prototype.takeRecords=function(){return []}}
+            
+            // 18. CSS.supports
+            if(!window.CSS||!CSS.supports){window.CSS=window.CSS||{};CSS.supports=function(prop,value){if(arguments.length===1)return prop.indexOf(":")!==-1;return true}}
+            
+            // 19. Element.replaceChildren
+            if(!Element.prototype.replaceChildren){Element.prototype.replaceChildren=function(){while(this.firstChild)this.removeChild(this.firstChild);this.append.apply(this,arguments)}}
+            
+            // 20. Element.toggleAttribute
+            if(!Element.prototype.toggleAttribute){Element.prototype.toggleAttribute=function(name,force){var has=this.hasAttribute(name);if(force===undefined)force=!has;if(force){if(!has)this.setAttribute(name,"");return true}else{if(has)this.removeAttribute(name);return false}}}
+            
+            // 21. String.matchAll
+            if(!String.prototype.matchAll){String.prototype.matchAll=function*(regex){var globalRegex=new RegExp(regex.source,regex.flags.includes("g")?regex.flags:regex.flags+"g");var match;while((match=globalRegex.exec(this))!==null)yield match}}
+            
+            // 22. Promise.allSettled
+            if(!Promise.allSettled){Promise.allSettled=function(promises){return Promise.all(promises.map(function(p){return Promise.resolve(p).then(function(v){return{status:"fulfilled",value:v}},function(r){return{status:"rejected",reason:r}})}))}}
+            
+            // 23. Array.prototype.flat/flatMap (ES2019 but needed for completeness)
+            if(!Array.prototype.flat){Array.prototype.flat=function(depth){depth=depth===undefined?1:depth;var result=[];for(var i=0;i<this.length;i++){var el=this[i];if(Array.isArray(el)&&depth>0){result.push.apply(result,el.flat(depth-1))}else{result.push(el)}}return result}}
+            if(!Array.prototype.flatMap){Array.prototype.flatMap=function(callback,thisArg){return this.map(callback,thisArg).flat(1)}}
+            
+            // 24. Object.fromEntries (ES2019)
+            if(!Object.fromEntries){Object.fromEntries=function(iterable){var obj={};for(var pair of iterable){obj[pair[0]]=pair[1]}return obj}}
+            
+            // 25. Symbol.asyncIterator (ES2018)
+            if(typeof Symbol!=="undefined"&&!Symbol.asyncIterator){Symbol.asyncIterator=Symbol("Symbol.asyncIterator")}
+            
+            // 26. String.prototype.trimStart/trimEnd (ES2019)
+            if(!String.prototype.trimStart){String.prototype.trimStart=function(){return this.replace(/^\\s+/,"")}}
+            if(!String.prototype.trimEnd){String.prototype.trimEnd=function(){return this.replace(/\\s+$/,"")}}
+            
+            // 27. Object.entries/values (ES2017 fallback)
+            if(!Object.entries){Object.entries=function(obj){var ownProps=Object.keys(obj);var i=ownProps.length;var resArray=new Array(i);while(i--)resArray[i]=[ownProps[i],obj[ownProps[i]]];return resArray}}
+            if(!Object.values){Object.values=function(obj){var ownProps=Object.keys(obj);var i=ownProps.length;var resArray=new Array(i);while(i--)resArray[i]=obj[ownProps[i]];return resArray}}
+            
+            // 28. padStart/padEnd (ES2017 fallback)
+            if(!String.prototype.padStart){String.prototype.padStart=function(targetLength,padString){targetLength=targetLength>>0;padString=String(padString||" ");if(this.length>targetLength)return String(this);targetLength=targetLength-this.length;if(targetLength>padString.length)padString+=padString.repeat(targetLength/padString.length);return padString.slice(0,targetLength)+String(this)}}
+            if(!String.prototype.padEnd){String.prototype.padEnd=function(targetLength,padString){targetLength=targetLength>>0;padString=String(padString||" ");if(this.length>targetLength)return String(this);targetLength=targetLength-this.length;if(targetLength>padString.length)padString+=padString.repeat(targetLength/padString.length);return String(this)+padString.slice(0,targetLength)}}
+            
+            // 29. Number.isFinite/isInteger (ES2015 fallback)
+            if(!Number.isFinite){Number.isFinite=function(value){return typeof value==="number"&&isFinite(value)}}
+            if(!Number.isInteger){Number.isInteger=function(value){return Number.isFinite(value)&&Math.floor(value)===value}}
+            
+            // 30. console.debug fallback
+            if(!console.debug){console.debug=console.log}
+            
+            // 31. requestIdleCallback fallback
+            if(!window.requestIdleCallback){window.requestIdleCallback=function(cb){return setTimeout(function(){cb({didTimeout:false,timeRemaining:function(){return 50}})},1)};window.cancelIdleCallback=function(id){clearTimeout(id)}}
+            
+            // 32. queueMicrotask fallback
+            if(!window.queueMicrotask){window.queueMicrotask=function(callback){Promise.resolve().then(callback).catch(function(e){setTimeout(function(){throw e})})}}
+            
+            // 33. FormData.entries/keys/values (for older iOS)
+            if(typeof FormData!=="undefined"&&!FormData.prototype.entries){FormData.prototype.entries=function*(){for(var pair of this._data||[])yield pair}}
+            
+            // 34. URLSearchParams polyfill enhancements
+            if(typeof URLSearchParams!=="undefined"&&!URLSearchParams.prototype.toString){URLSearchParams.prototype.toString=function(){var pairs=[];this.forEach(function(v,k){pairs.push(encodeURIComponent(k)+"="+encodeURIComponent(v))});return pairs.join("&")}}
+            
+            // 35. PerformanceObserver fallback
+            if(typeof PerformanceObserver==="undefined"){window.PerformanceObserver=function(callback){this._callback=callback};PerformanceObserver.prototype.observe=function(){};PerformanceObserver.prototype.disconnect=function(){};PerformanceObserver.prototype.takeRecords=function(){return []};PerformanceObserver.supportedEntryTypes=[]}
+            
+          })();
+          PATCHEOF
+
+      - name: Write legacy-transpiler.js
+        run: |
+          cat > Payload/GLM.app/legacy-transpiler.js <<'LTEOF'
+          var LegacyTranspiler=(()=>{var __defProp=Object.defineProperty;var __getOwnPropDesc=Object.getOwnPropertyDescriptor;var __getOwnPropNames=Object.getOwnPropertyNames;var __hasOwnProp=Object.prototype.hasOwnProperty;var __export=(target,all)=>{for(var name in all)__defProp(target,name,{get:all[name],enumerable:true})};var __copyProps=(to,from,except,desc)=>{if(from&&typeof from==="object"||typeof from==="function"){for(let key of __getOwnPropNames(from))if(!__hasOwnProp.call(to,key)&&key!==except)__defProp(to,key,{get:()=>from[key],enumerable:!(desc=__getOwnPropDesc(from,key))||desc.enumerable})}return to};var __toCommonJS=(mod)=>__copyProps(__defProp({},"__esModule",{value:true}),mod);var index_exports={};__export(index_exports,{exportModule:()=>exportModule,importModule:()=>importModule,init:()=>init,loadCode:()=>loadCode,transpile:()=>transpile});
+          // Simplified transpiler for iOS 15 - handles import/export and modern syntax
+          function init(options2){window._ltOptions=options2}
+          function exportModule(source,exports){window._ltModuleExports=window._ltModuleExports||{};window._ltModuleExports[source]=exports}
+          function importModule(source){return new Promise(function(resolve){var exports=window._ltModuleExports&&window._ltModuleExports[source];if(exports){resolve(exports)}else{setTimeout(function(){resolve(window._ltModuleExports&&window._ltModuleExports[source]||{})},500)}})}
+          function transpile(src,code){return code.replace(/import\\s+\\{([^}]+)\\}\\s+from\\s+['"]([^'"]+)['"]/g,"var{$1}=await LegacyTranspiler.importModule('$2')").replace(/import\\s+(\\w+)\\s+from\\s+['"]([^'"]+)['"]/g,"var $1=await LegacyTranspiler.importModule('$2')").replace(/import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s+['"]([^'"]+)['"]/g,"var $1=await LegacyTranspiler.importModule('$2')").replace(/export\\s+default\\s+/g,"var __default=").replace(/export\\s+\\{([^}]+)\\}/g,"").replace(/export\\s+const\\s+/g,"var ").replace(/export\\s+let\\s+/g,"var ").replace(/export\\s+var\\s+/g,"var ").replace(/export\\s+function\\s+/g,"var ").replace(/export\\s+class\\s+/g,"var ").replace(/export\\s+\\{/g,"/* export {").replace(/\\}\\s*from/g,"} */ from").replace(/\\bawait\\b/g,"await").replace(/\\?\\?=/g,"=").replace(/\\|\\|=/g,"=").replace(/&&=/g,"=").replace(/\\.\\?\\./g,".").replace(/#(\\w+)/g,"_$1")}
+          function loadCode(src){fetch(src).then(function(r){return r.text()}).then(function(code){var patched=transpile(src,code);window._ltOptions&&window._ltOptions.runScript&&window._ltOptions.runScript(patched)})}
+          return __toCommonJS(index_exports);
+          })();
+          LTEOF
+
+      - name: Write Swift app code
+        run: |
+          cat > app.swift <<'SWIFTEOF'
           import UIKit
           import WebKit
           import AVFoundation
 
-          class VC: UIViewController, WKScriptMessageHandler, WKUIDelegate {
+          class VC: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
               var wv: WKWebView!
               var lastColor = "255,255,255"
               var stableCount = 0
               var sb = false
-
+              var patchScriptHandler: WKUserContentController?
+              
               override var preferredStatusBarStyle: UIStatusBarStyle {
                   return sb ? .lightContent : .darkContent
               }
-
+              
+              override var prefersStatusBarHidden: Bool {
+                  return false
+              }
+              
               override func viewDidLoad() {
                   super.viewDidLoad()
                   view.backgroundColor = UIColor.white
                   sb = false
+                  
+                  // Request microphone permission on launch
                   AVCaptureDevice.requestAccess(for: .audio) { _ in }
-
+                  
                   let c = WKWebViewConfiguration()
                   c.userContentController.add(self, name: "themeHandler")
+                  c.userContentController.add(self, name: "patchScript")
                   c.allowsInlineMediaPlayback = true
                   c.mediaTypesRequiringUserActionForPlayback = []
-
-                  // === THEME DETECTION JS (injected at document start) ===
-                  let themeJS = """
-                  (function(){
-                    var lastSent='255,255,255',stable=0;
-                    var selectors=['header','nav','[class*=header]','.app-header','.navbar',
-                      '[class*=Header]','[class*=top-bar]','[class*=TopBar]',
-                      '[class*=app-bar]','[class*=toolbar]','[class*=nav-bar]',
-                      '[class*=NavBar]','[class*=topbar]','[class*=Topbar]'];
-
-                    function getTopColor(){
-                      try {
-                        for(var i=0;i<selectors.length;i++){
-                          var el=document.querySelector(selectors[i]);
-                          if(el){
-                            var rect=el.getBoundingClientRect();
-                            if(rect.top<=5 && rect.height>20){
-                              var cs=getComputedStyle(el);
-                              var c=cs.backgroundColor;
-                              var m=c.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                              if(m && c!=='rgba(0, 0, 0, 0)' && c!=='transparent'){
-                                return m[1]+','+m[2]+','+m[3];
-                              }
-                              var bg=cs.getPropertyValue('--header-bg')||cs.getPropertyValue('--background')||cs.getPropertyValue('--bg');
-                              if(bg){
-                                var m2=bg.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                                if(m2) return m2[1]+','+m2[2]+','+m2[3];
-                              }
-                            }
-                          }
-                        }
-                        var bodyBg=getComputedStyle(document.body).backgroundColor;
-                        var m3=bodyBg.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                        if(m3 && bodyBg!=='rgba(0, 0, 0, 0)' && bodyBg!=='transparent') return m3[1]+','+m3[2]+','+m3[3];
-                        var htmlBg=getComputedStyle(document.documentElement).backgroundColor;
-                        var m4=htmlBg.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                        if(m4 && htmlBg!=='rgba(0, 0, 0, 0)' && htmlBg!=='transparent') return m4[1]+','+m4[2]+','+m4[3];
-                        var all=document.querySelectorAll('*');
-                        for(var j=0;j<Math.min(all.length,30);j++){
-                          var r=all[j].getBoundingClientRect();
-                          if(r.top<=0 && r.height>10){
-                            var bc=getComputedStyle(all[j]).backgroundColor;
-                            var mx=bc.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                            if(mx && bc!=='rgba(0, 0, 0, 0)' && bc!=='transparent') return mx[1]+','+mx[2]+','+mx[3];
-                          }
-                        }
-                      } catch(e) {}
-                      return '255,255,255';
-                    }
-
-                    function sendColor(){
-                      try {
-                        var color=getTopColor();
-                        if(color===lastSent){
-                          stable++;
-                          if(stable>=2){
-                            window.webkit.messageHandlers.themeHandler.postMessage(color);
-                          }
-                        } else {
-                          stable=0;
-                          lastSent=color;
-                        }
-                      } catch(e) {}
-                    }
-
-                    sendColor();
-                    setInterval(sendColor,400);
-
-                    var obs=new MutationObserver(function(){ sendColor(); });
-                    obs.observe(document.documentElement,{attributes:true,childList:true,subtree:true});
-
-                    var htmlObs=new MutationObserver(function(){ sendColor(); });
-                    htmlObs.observe(document.documentElement,{attributeFilter:['class','data-theme','data-color-scheme','style']});
-                  })();
-                  """
-
-                  // === COMPREHENSIVE ES2022+/2023/2024 PATCH JS ===
-                  let patchJS = """
-                  (function(){
-                    'use strict';
-                    var iosVersion='15.0';
-                    try{var m=navigator.userAgent.match(/OS (\d+)[._](\d+)/);if(m)iosVersion=m[1]+'.'+m[2];}catch(e){}
-
-                    var _moduleExports={};
-                    var _importWaitlist={};
-                    var _loaded=new Set();
-                    var _cacheName='glm-transpiled-v2';
-
-                    function openCache(){if(typeof caches==='undefined')return Promise.resolve(null);try{return caches.open(_cacheName);}catch(e){return Promise.resolve(null);}}
-                    function resolveModule(source){if(!source.startsWith('./')&&!source.startsWith('../'))return source;var base=window.LegacyTranspiler.BASE_URL||window.location.href.replace(/\/[^\/]*$/,'');return base+'/'+source.replace(/^\.\//,'');}
-
-                    window.LegacyTranspiler={
-                      version:'2.0.0-glm',
-                      init:function(opts){this._opts=opts||{};this.BASE_URL=opts.BASE_URL||'';this._target=opts.target||{platform:'iOS',version:'15.0'};},
-                      exportModule:function(source,exports){_moduleExports[source]=exports;if(_importWaitlist[source]){_importWaitlist[source].forEach(function(r){r();});delete _importWaitlist[source];}},
-                      importModule:function(source){source=resolveModule(source);if(_moduleExports[source])return Promise.resolve(_moduleExports[source]);var self=this;return new Promise(function(resolve){if(!_importWaitlist[source])_importWaitlist[source]=[];_importWaitlist[source].push(function(){resolve(_moduleExports[source]);});self.loadCode(source);});},
-                      loadCode:function(src){if(_loaded.has(src))return;_loaded.add(src);var self=this;openCache().then(function(cache){if(cache){return cache.match(src).then(function(cached){if(cached){console.log('[GLM cache hit]',src);return cached.text().then(function(code){self._runScript(code,src);});}return self._fetchAndTranspile(src,cache);});}return self._fetchAndTranspile(src,null);});},
-                      _fetchAndTranspile:function(src,cache){var self=this;console.warn('[GLM cache miss]',src);return fetch(src).then(function(r){return r.text();}).then(function(code){var patched=self.transpile(src,code);if(cache)cache.put(src,new Response(patched));self._runScript(patched,src);}).catch(function(err){console.error('[GLM transpile error]',src,err);});},
-                      _runScript:function(code,src){if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.patchScript){window.webkit.messageHandlers.patchScript.postMessage(code);}else{var s=document.createElement('script');s.textContent=code;document.head.appendChild(s);}},
-                      transpile:function(src,code){
-                        var result=code;
-                        var staticBlockCounter=0;
-                        result=result.replace(/static\s*\{([^}]*)\}/g,function(m,body){var methodName='_static_block_'+(staticBlockCounter++);return'static '+methodName+'(){'+body+'}';});
-                        result=result.replace(/static\s+(\w+)\s*=\s*([^;]+);/g,'static get $1(){return $2;}');
-                        result=result.replace(/#(\w+)/g,'_private_$1');
-                        result=result.replace(/(\w+)\s*\|\|=\s*([^;]+)/g,'$1=$1||($1=$2)');
-                        result=result.replace(/(\w+)\s*\&\&=\s*([^;]+)/g,'$1=$1\&\&($1=$2)');
-                        result=result.replace(/(\w+)\s*\?\?=\s*([^;]+)/g,'$1=$1==null?($1=$2):$1');
-                        result=result.replace(/\.at\((-?\d+)\)/g,function(m,idx){var i=parseInt(idx);return'['+(i>=0?i:'this.length'+i)+']';});
-                        result=result.replace(/Object\.hasOwn\(/g,'Object.prototype.hasOwnProperty.call(');
-                        result=result.replace(/new\s+(\w+Error)\(([^,]+),\s*\{cause:/g,'new $1($2 + " cause: " + $2.cause || "")');
-                        result=result.replace(/\.findLast\(/g,'.slice().reverse().find(');
-                        result=result.replace(/\.findLastIndex\(/g,'.length - 1 - [].slice().reverse().findIndex(');
-                        result=result.replace(/\.toSorted\(/g,'.slice().sort(');
-                        result=result.replace(/\.toReversed\(/g,'.slice().reverse(');
-                        result=result.replace(/\.toSpliced\(/g,'.slice().splice(');
-                        result=result.replace(/\.with\((\d+),\s*([^)]+)\)/g,'.slice(); var _arr = $&; _arr[$1] = $2; _arr');
-                        result=result.replace(/\.isWellFormed\(\)/g,'.match(/\p{Surrogate}/u) === null');
-                        result=result.replace(/\.toWellFormed\(\)/g,'.replace(/\p{Surrogate}/gu, "\uFFFD")');
-                        result=result.replace(/Promise\.withResolvers\(\)/g,'(function(){var d={},p=new Promise(function(r,j){d.resolve=r;d.reject=j;});d.promise=p;return d;})()');
-                        result=result.replace(/Object\.groupBy\(/g,'(function(arr,fn){var r={};arr.forEach(function(x){var k=fn(x);(r[k]=r[k]||[]).push(x);});return r;})(');
-                        result=result.replace(/Map\.groupBy\(/g,'(function(arr,fn){var r=new Map();arr.forEach(function(x){var k=fn(x);if(!r.has(k))r.set(k,[]);r.get(k).push(x);});return r;})(');
-                        result=result.replace(/new\s+RegExp\(([^,]+),\s*['"]([^'"]*)v([^'"]*)['"]\)/g,'new RegExp($1,"$2u$3")');
-                        result=result.replace(/\/([^/]+)\/([gimsuy]*)v([gimsuy]*)/g,'/$1/$2u$3');
-                        result=result.replace(/\.replaceAll\(/g,'.split().join(');
-                        result=result.replace(/import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?/g,function(m,specs,path){var items=specs.split(',').map(function(s){return s.trim();});var props=items.map(function(item){var parts=item.split(/\s+as\s+/);if(parts.length===2)return parts[1]+':'+parts[0];return item+':'+item;}).join(',');return'var _mod=await window.LegacyTranspiler.importModule("'+path+'");var {'+props+'}=_mod;';});
-                        result=result.replace(/import\s+\*\s+as\s+(\w+)\s+from\s+['"]([^'"]+)['"];?/g,'var $1=await window.LegacyTranspiler.importModule("$2");');
-                        result=result.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"];?/g,'var $1=(await window.LegacyTranspiler.importModule("$2")).default||await window.LegacyTranspiler.importModule("$2");');
-                        result=result.replace(/import\s+['"]([^'"]+)['"];?/g,'await window.LegacyTranspiler.importModule("$1");');
-                        var exports=[];
-                        result=result.replace(/export\s+default\s+(class|function)\s+(\w+)/g,function(m,type,name){exports.push({key:'default',value:name});return type+' '+name;});
-                        result=result.replace(/export\s+default\s+([^;]+);?/g,function(m,expr){exports.push({key:'default',value:'__default'});return'var __default='+expr;});
-                        result=result.replace(/export\s+\{([^}]+)\};?/g,function(m,specs){var items=specs.split(',').map(function(s){return s.trim();});items.forEach(function(item){var parts=item.split(/\s+as\s+/);if(parts.length===2)exports.push({key:parts[1].trim(),value:parts[0].trim()});else exports.push({key:item,value:item});});return'';});
-                        result=result.replace(/export\s+(class|function|const|let|var)\s+(\w+)/g,function(m,type,name){exports.push({key:name,value:name});return type+' '+name;});
-                        result=result.replace(/export\s+\*\s+from\s+['"]([^'"]+)['"];?/g,'');
-                        if(exports.length>0){var props=exports.map(function(e){return e.key===e.value?e.key:e.key+':'+e.value;}).join(',');result+='\nwindow.LegacyTranspiler.exportModule("'+src+'",{'+props+'});';}
-                        result=result.replace(/import\.meta\.url/g,'(document.currentScript&&document.currentScript.src||window.location.href)');
-                        if(result.indexOf('await ')>-1 && result.indexOf('(async function(){')===-1){result='(async function(){\n'+result+'\n})();';}
-                        result=result.replace(/(\d)_(\d)/g,'$1$2');
-                        result=result.replace(/(\d+)n\b/g,'$1');
-                        result=result.replace(/new\s+WeakRef\(/g,'({deref:function(){return null;}})');
-                        result=result.replace(/new\s+FinalizationRegistry\(/g,'({register:function(){},unregister:function(){}})');
-                        result=result.replace(/new\s+AggregateError\(/g,'new Error(');
-                        result=result.replace(/Temporal\.Now\.instant\(\)/g,'new Date()');
-                        result=result.replace(/Iterator\.from\(/g,'Array.from(');
-                        result=result.replace(/Array\.fromAsync\(/g,'(async function(arr){var r=[];for await(var x of arr)r.push(x);return r;})(');
-                        result=result.replace(/Promise\.try\(/g,'new Promise(function(r){r(');
-                        result=result.replace(/new\s+Float16Array\(/g,'new Float32Array(');
-                        result=result.replace(/\.toHex\(\)/g,'.reduce(function(s,b){return s+b.toString(16).padStart(2,"0");}, "")');
-                        result=result.replace(/Uint8Array\.fromHex\(/g,'(function(h){var r=[];for(var i=0;i<h.length;i+=2)r.push(parseInt(h.substr(i,2),16));return new Uint8Array(r);})(');
-                        result=result.replace(/RegExp\.escape\(/g,'(function(s){return s.replace(/[\^$.*+?()[\]{}|]/g, "\$&");})(');
-                        result=result.replace(/Math\.sumPrecise\(/g,'(function(arr){return arr.reduce(function(a,b){return a+b;},0);})(');
-                        result=result.replace(/URL\.parse\(/g,'new URL(');
-                        result=result.replace(/URL\.canParse\(/g,'(function(u){try{new URL(u);return true;}catch(e){return false;}})(');
-                        return "'use strict';\n"+result;
-                      }
-                    };
-
-                    (function(w){var proto=w.MediaQueryList&&w.MediaQueryList.prototype;if(!proto){var mm=w.matchMedia&&w.matchMedia('all');if(mm)proto=Object.getPrototypeOf(mm);}if(!proto)return;var wrappers=new WeakMap();if(!proto.addEventListener){proto.addEventListener=function(type,listener){if(type!=='change')return;if(typeof listener==='function'){proto.addListener.call(this,listener);}else{var wrapper=wrappers.get(listener);if(!wrapper){wrapper=function(ev){listener.handleEvent(ev);};wrappers.set(listener,wrapper);}proto.addListener.call(this,wrapper);}};}if(!proto.removeEventListener){proto.removeEventListener=function(type,listener){if(type!=='change')return;if(typeof listener==='function'){proto.removeListener.call(this,listener);}else{var wrapper=wrappers.get(listener);if(wrapper)proto.removeListener.call(this,wrapper);}};}})(window);
-
-                    (function(){var nativeFetch=window.fetch.bind(window);window.fetch=function(url,opts){opts=opts||{};if(opts.headers){if(opts.headers instanceof Headers){opts.headers.delete('traceparent');opts.headers.delete('tracestate');}else if(typeof opts.headers==='object'&&!Array.isArray(opts.headers)){delete opts.headers.traceparent;delete opts.headers.tracestate;}}return nativeFetch(url,opts);};})();
-
-                    (function(){if(typeof window==='undefined'||typeof Element==='undefined')return;var proto=Element.prototype;var native=proto.animate;if(typeof native!=='function')return;function sanitize(opts){if(typeof opts!=='object'||opts===null)return opts;var copy={};for(var k in opts)copy[k]=opts[k];if(typeof copy.easing==='string')copy.easing='linear';delete copy.composite;delete copy.pseudoElement;delete copy.iterationComposite;return copy;}function noopAnim(){var noop=function(){};var resolveFinished=function(){};var finished=new Promise(function(r){resolveFinished=r;});var anim={finished:finished,ready:finished,playState:'finished',currentTime:0,startTime:0,playbackRate:1,pending:false,replaceState:'active',timeline:null,effect:null,id:'',onfinish:null,oncancel:null,onremove:null,play:noop,pause:noop,finish:noop,cancel:noop,reverse:noop,persist:noop,commitStyles:noop,updatePlaybackRate:noop,addEventListener:noop,removeEventListener:noop,dispatchEvent:function(){return false;},overallProgress:null};resolveFinished(anim);return anim;}proto.animate=function(keyframes,options){try{return native.call(this,keyframes,options);}catch(e){try{return native.call(this,keyframes,sanitize(options));}catch(e2){return noopAnim();}}};})();
-
-                    if(!window.ResizeObserver){window.ResizeObserver=function(cb){this._cb=cb;this._els=[];};window.ResizeObserver.prototype.observe=function(el){this._els.push(el);};window.ResizeObserver.prototype.unobserve=function(el){var idx=this._els.indexOf(el);if(idx>-1)this._els.splice(idx,1);};window.ResizeObserver.prototype.disconnect=function(){this._els=[];};}
-                    if(!window.requestIdleCallback){window.requestIdleCallback=function(cb,opts){var start=Date.now();return setTimeout(function(){cb({didTimeout:false,timeRemaining:function(){return Math.max(0,50-(Date.now()-start));}});},opts&&opts.timeout?opts.timeout:1);};window.cancelIdleCallback=function(id){clearTimeout(id);};}
-                    if(!window.queueMicrotask){window.queueMicrotask=function(cb){Promise.resolve().then(cb);};}
-                    if(!window.globalThis)window.globalThis=window;
-                    if(!Array.prototype.flat){Array.prototype.flat=function(depth){depth=depth===undefined?1:depth;var res=[];(function flat(arr,d){arr.forEach(function(x){if(Array.isArray(x)&&d>0)flat(x,d-1);else res.push(x);});})(this,depth);return res;};}
-                    if(!Array.prototype.flatMap){Array.prototype.flatMap=function(fn,thisArg){return this.map(fn,thisArg).flat(1);};}
-                    if(!Object.fromEntries){Object.fromEntries=function(iterable){var obj={};for(var i=0;i<iterable.length;i++){obj[iterable[i][0]]=iterable[i][1];}return obj;};}
-                    if(!Object.entries){Object.entries=function(obj){var res=[];for(var k in obj)if(obj.hasOwnProperty(k))res.push([k,obj[k]]);return res;};}
-                    if(!String.prototype.matchAll){String.prototype.matchAll=function*(regex){var flags=(regex.flags||'')+'g';var re=new RegExp(regex.source,flags);var m;while((m=re.exec(this))!==null)yield m;};}
-                    if(!Symbol.asyncIterator)Symbol.asyncIterator=Symbol('asyncIterator');
-                    if(!window.AbortController){window.AbortController=function(){this.signal={aborted:false,addEventListener:function(){},removeEventListener:function(){}};};window.AbortController.prototype.abort=function(){this.signal.aborted=true;if(this.signal.onabort)this.signal.onabort();};}
-                    if(!window.URLPattern){window.URLPattern=function(pattern){this._pattern=pattern;this.protocol='';this.username='';this.password='';this.hostname='';this.port='';this.pathname='';this.search='';this.hash='';};window.URLPattern.prototype.test=function(url){return true;};window.URLPattern.prototype.exec=function(url){return {};};}
-                    if(!window.structuredClone){window.structuredClone=function(obj){return JSON.parse(JSON.stringify(obj));};}
-                    if(!Array.prototype.at){Array.prototype.at=function(n){n=Math.trunc(n)||0;if(n<0)n+=this.length;if(n<0||n>=this.length)return undefined;return this[n];};}
-                    if(!String.prototype.at){String.prototype.at=function(n){n=Math.trunc(n)||0;if(n<0)n+=this.length;if(n<0||n>=this.length)return undefined;return this[n];};}
-                    if(!Object.hasOwn){Object.hasOwn=function(obj,prop){return Object.prototype.hasOwnProperty.call(obj,prop);};}
-                    if(!Promise.any){Promise.any=function(promises){return Promise.race(promises);};}
-                    if(!Promise.allSettled){Promise.allSettled=function(promises){return Promise.all(promises.map(function(p){return p.then(function(v){return{status:'fulfilled',value:v};}).catch(function(e){return{status:'rejected',reason:e};});}));};}
-                    if(!Array.prototype.toSorted){Array.prototype.toSorted=function(compareFn){return this.slice().sort(compareFn);};}
-                    if(!Array.prototype.toReversed){Array.prototype.toReversed=function(){return this.slice().reverse();};}
-                    if(!Array.prototype.toSpliced){Array.prototype.toSpliced=function(start,deleteCount){var arr=this.slice();arr.splice.apply(arr,arguments);return arr;};}
-                    if(!Array.prototype.with){Array.prototype.with=function(index,value){var arr=this.slice();arr[index]=value;return arr;};}
-
-                    function hideBanners(){var selectors=['.download-app','[class*="download"]','[class*="Download"]','.app-banner','[class*="app-banner"]','[class*="AppBanner"]','.mobile-app','[class*="mobile-app"]','.get-app','[class*="get-the-app"]','[class*="install"]','.zai-app-banner','.glm-app-banner','[class*="app-download"]','[class*="DownloadApp"]','.app-promo','[class*="appPromo"]'];selectors.forEach(function(sel){var els=document.querySelectorAll(sel);for(var i=0;i<els.length;i++){els[i].style.display='none';els[i].style.visibility='hidden';}});}
-                    hideBanners();setInterval(hideBanners,500);
-                    var bannerObs=new MutationObserver(hideBanners);
-                    bannerObs.observe(document.documentElement,{childList:true,subtree:true});
-
-                    var vpMeta=document.querySelector('meta[name="viewport"]');
-                    if(!vpMeta){vpMeta=document.createElement('meta');vpMeta.name='viewport';vpMeta.content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover';document.head.appendChild(vpMeta);}
-
-                    var style=document.createElement('style');
-                    style.textContent='input, textarea, select { font-size: 16px !important; }';
-                    document.head.appendChild(style);
-
-                    window.LegacyTranspiler.init({BASE_URL:window.location.origin,runScript:function(code){if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.patchScript){window.webkit.messageHandlers.patchScript.postMessage(code);}else{var s=document.createElement('script');s.textContent=code;document.head.appendChild(s);}},target:{platform:'iOS',version:iosVersion}});
-
-                    var scriptObs=new MutationObserver(function(mutations){mutations.forEach(function(mutation){mutation.addedNodes.forEach(function(node){if(node.tagName==='SCRIPT'&&node.src){if(node.src.includes('index')||node.src.includes('chunk')||node.src.includes('vendor')||node.src.includes('main')||node.src.includes('app')||node.src.includes('bundle')){if(node.type!=='javascript/blocked'){node.type='javascript/blocked';window.LegacyTranspiler.loadCode(node.src);}}}});});});
-                    scriptObs.observe(document.documentElement,{childList:true,subtree:true});
-
-                    console.log('[GLM Wrapper] Patches loaded. iOS version:',iosVersion);
-                  })();
-                  """
-
-                  c.userContentController.addUserScript(WKUserScript(source: themeJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-                  c.userContentController.addUserScript(WKUserScript(source: patchJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-
+                  c.preferences.javaScriptEnabled = true
+                  c.defaultWebpagePreferences.allowsContentJavaScript = true
+                  
+                  // Load theme detection JS from file
+                  if let themePath = Bundle.main.path(forResource: "theme", ofType: "js"),
+                     let themeJS = try? String(contentsOfFile: themePath, encoding: .utf8) {
+                      c.userContentController.addUserScript(WKUserScript(
+                          source: themeJS,
+                          injectionTime: .atDocumentStart,
+                          forMainFrameOnly: false
+                      ))
+                  }
+                  
+                  // Load ES2020+ patches from file
+                  if let patchPath = Bundle.main.path(forResource: "patches", ofType: "js"),
+                     let patchJS = try? String(contentsOfFile: patchPath, encoding: .utf8) {
+                      c.userContentController.addUserScript(WKUserScript(
+                          source: patchJS,
+                          injectionTime: .atDocumentStart,
+                          forMainFrameOnly: false
+                      ))
+                  }
+                  
+                  // Load legacy transpiler from file
+                  if let ltPath = Bundle.main.path(forResource: "legacy-transpiler", ofType: "js"),
+                     let ltJS = try? String(contentsOfFile: ltPath, encoding: .utf8) {
+                      c.userContentController.addUserScript(WKUserScript(
+                          source: ltJS,
+                          injectionTime: .atDocumentStart,
+                          forMainFrameOnly: false
+                      ))
+                  }
+                  
+                  // Inject iOS version for transpiler target detection
+                  let iosVersion = UIDevice.current.systemVersion
+                  let versionScript = "var iosVersion='\\(iosVersion)';"
+                  c.userContentController.addUserScript(WKUserScript(
+                      source: versionScript,
+                      injectionTime: .atDocumentStart,
+                      forMainFrameOnly: false
+                  ))
+                  
                   wv = WKWebView(frame: .zero, configuration: c)
                   wv.translatesAutoresizingMaskIntoConstraints = false
                   wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
                   wv.uiDelegate = self
+                  wv.navigationDelegate = self
+                  wv.allowsBackForwardNavigationGestures = true
+                  wv.scrollView.contentInsetAdjustmentBehavior = .never
+                  
                   view.addSubview(wv)
                   NSLayoutConstraint.activate([
                       wv.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
@@ -256,26 +325,66 @@ jobs:
                       wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       wv.bottomAnchor.constraint(equalTo: view.bottomAnchor)
                   ])
-                  wv.load(URLRequest(url: URL(string: "https://chat.z.ai/")!))
-              }
-
-              func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) { completionHandler() }
-              func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { completionHandler(true) }
-              func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) { completionHandler(defaultText) }
-
-              func userContentController(_ u: WKUserContentController, didReceive m: WKScriptMessage) {
-                  if let rgb = m.body as? String {
-                      let p = rgb.split(separator: ",").compactMap { Int($0) }
-                      guard p.count == 3 else { return }
-                      let R = CGFloat(p[0]) / 255.0
-                      let G = CGFloat(p[1]) / 255.0
-                      let B = CGFloat(p[2]) / 255.0
-                      view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
-                      let luminance = (0.299 * CGFloat(p[0]) + 0.587 * CGFloat(p[1]) + 0.114 * CGFloat(p[2])) / 255.0
-                      if luminance < 0.45 { sb = true }
-                      else if luminance > 0.55 { sb = false }
-                      setNeedsStatusBarAppearanceUpdate()
+                  
+                  if let url = URL(string: "https://chat.z.ai") {
+                      wv.load(URLRequest(url: url))
                   }
+              }
+              
+              // MARK: - Theme Handler
+              func userContentController(_ u: WKUserContentController, didReceive m: WKScriptMessage) {
+                  if m.name == "themeHandler" {
+                      if let rgb = m.body as? String {
+                          let p = rgb.split(separator: ",").compactMap { Int($0) }
+                          guard p.count >= 3 else { return }
+                          let R = CGFloat(p[0]) / 255.0
+                          let G = CGFloat(p[1]) / 255.0
+                          let B = CGFloat(p[2]) / 255.0
+                          view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
+                          let luminance = (0.299 * CGFloat(p[0]) + 0.587 * CGFloat(p[1]) + 0.114 * CGFloat(p[2])) / 255.0
+                          if luminance < 0.45 {
+                              sb = true
+                          } else if luminance > 0.55 {
+                              sb = false
+                          }
+                          setNeedsStatusBarAppearanceUpdate()
+                      }
+                  } else if m.name == "patchScript" {
+                      if let code = m.body as? String {
+                          wv.evaluateJavaScript(code, completionHandler: nil)
+                      }
+                  }
+              }
+              
+              // MARK: - JS Dialog Auto-Accept
+              func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+                  completionHandler()
+              }
+              
+              func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+                  completionHandler(true)
+              }
+              
+              func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+                  completionHandler(defaultText)
+              }
+              
+              // MARK: - Navigation Delegate (handle new windows)
+              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                  if navigationAction.targetFrame == nil {
+                      webView.load(navigationAction.request)
+                      decisionHandler(.cancel)
+                      return
+                  }
+                  decisionHandler(.allow)
+              }
+              
+              // MARK: - External links
+              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  if let url = navigationAction.request.url {
+                      UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                  }
+                  return nil
               }
           }
 
@@ -290,41 +399,78 @@ jobs:
           }
 
           UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AD.self))
-          SWIFT_EOF
+          SWIFTEOF
 
+      - name: Compile Swift
+        run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/GLM.app/GLM app.swift
+          xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 \
+            -framework UIKit -framework WebKit -framework AVFoundation \
+            -o Payload/GLM.app/GLM app.swift
           chmod +x Payload/GLM.app/GLM
 
-          cat > Payload/GLM.app/Info.plist <<'PLIST_EOF'
+      - name: Create Info.plist
+        run: |
+          cat > Payload/GLM.app/Info.plist <<'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-          <key>CFBundleExecutable</key><string>GLM</string>
-          <key>CFBundleIdentifier</key><string>com.zhipu.glm</string>
-          <key>CFBundleName</key><string>GLM</string>
-          <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleShortVersionString</key><string>1.0</string>
-          <key>CFBundleVersion</key><string>1</string>
-          <key>LSRequiresIPhoneOS</key><true/>
-          <key>MinimumOSVersion</key><string>15.0</string>
-          <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-          <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
-          <key>UIViewControllerBasedStatusBarAppearance</key><true/>
-          <key>CFBundleIcons</key><dict><key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array><key>CFBundleIconName</key><string>AppIcon</string></dict></dict>
-          <key>NSMicrophoneUsageDescription</key><string>GLM needs microphone for voice input.</string>
-          <key>NSCameraUsageDescription</key><string>GLM needs camera for image uploads.</string>
-          <key>NSLocationWhenInUseUsageDescription</key><string>GLM needs location for AI features.</string>
-          <key>NSPhotoLibraryUsageDescription</key><string>GLM needs photo library for image uploads.</string>
+            <key>CFBundleExecutable</key><string>GLM</string>
+            <key>CFBundleIdentifier</key><string>com.z.ai.glm</string>
+            <key>CFBundleName</key><string>GLM</string>
+            <key>CFBundleDisplayName</key><string>GLM</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSRequiresIPhoneOS</key><true/>
+            <key>MinimumOSVersion</key><string>15.0</string>
+            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+            <key>UISupportedInterfaceOrientations</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+            <key>CFBundleIcons</key>
+            <dict>
+              <key>CFBundlePrimaryIcon</key>
+              <dict>
+                <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
+                <key>CFBundleIconName</key><string>AppIcon</string>
+              </dict>
+            </dict>
+            <key>NSMicrophoneUsageDescription</key><string>GLM needs microphone for voice input.</string>
+            <key>NSCameraUsageDescription</key><string>GLM needs camera for image uploads.</string>
+            <key>NSLocationWhenInUseUsageDescription</key><string>GLM needs location for AI features.</string>
+            <key>NSPhotoLibraryUsageDescription</key><string>GLM needs photo library for image uploads.</string>
+            <key>NSPhotoLibraryAddUsageDescription</key><string>GLM needs to save images to your photo library.</string>
+            <key>NSFaceIDUsageDescription</key><string>GLM uses Face ID for secure authentication.</string>
+            <key>UIBackgroundModes</key>
+            <array>
+              <string>audio</string>
+              <string>fetch</string>
+            </array>
+            <key>WKAppBoundDomains</key>
+            <array>
+              <string>chat.z.ai</string>
+              <string>z.ai</string>
+            </array>
           </dict>
           </plist>
-          PLIST_EOF
+          PLISTEOF
 
+      - name: Create PkgInfo
+        run: |
           printf 'APPL????' > Payload/GLM.app/PkgInfo
+
+      - name: Create IPA
+        run: |
           zip -r GLM.ipa Payload
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: GLM-IPA
           path: GLM.ipa
