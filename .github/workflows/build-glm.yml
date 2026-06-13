@@ -1,590 +1,668 @@
-name: Build GLM
+Here's your GLM Debug App — a complete GitHub Actions workflow that builds an ultimate debug IPA for chat.z.ai on iOS 15.8.
+📋 How to Use
+1.  Create a new GitHub repository (or use an existing one)
+2.  Create .github/workflows/build.yml and paste the workflow below
+3.  Run the workflow via Actions tab → Build GLM Debug → Run workflow
+4.  Download the IPA artifact and install via TrollStore
+5.  Tap the red 🐛 button to open the debug console
+6.  Copy all logs and send them to me for patching
+----
+🔧 Complete Workflow File
+Download: build_glm_debug.yml sandbox:///mnt/agents/output/build_glm_debug.yml
+Or copy this into .github/workflows/build.yml:
+name: Build GLM Debug
 on: workflow_dispatch
 jobs:
-  build:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
+build:
+runs-on: macos-latest
+steps:
+- uses: actions/checkout@v4
+  - run: |
+      set -ex
+      mkdir -p Payload/GLM.app
       
-      - name: Create app structure
-        run: |
-          set -ex
-          mkdir -p Payload/GLM.app
-          
-      - name: Write theme.js (Dynamic Status Bar)
-        run: |
-          cat > Payload/GLM.app/theme.js <<'THEMEEOF'
-          (function(){
-            'use strict';
-            var lastColor = '';
-            var stableCount = 0;
-            var sentColor = '255,255,255';
-            
-            function getTopColor() {
-              try {
-                var selectors = ['header','nav','[class*=header]','.app-header','.navbar','[class*=topbar]','[class*=app-bar]','[role=banner]','[class*=toolbar]','#header','.chat-header','.glm-header','.top-nav','.site-header'];
-                for (var i = 0; i < selectors.length; i++) {
-                  var el = document.querySelector(selectors[i]);
-                  if (el) {
-                    var rect = el.getBoundingClientRect();
-                    if (rect.top <= 5 && rect.height > 20) {
-                      var c = getComputedStyle(el).backgroundColor;
-                      var m = c.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                      if (m && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') {
-                        return m[1] + ',' + m[2] + ',' + m[3];
-                      }
-                    }
-                  }
-                }
-                var b = document.body;
-                var ht = document.documentElement;
-                while (b && b !== ht) {
-                  var cs = getComputedStyle(b);
-                  var bc = cs.backgroundColor;
-                  if (bc && bc !== 'rgba(0, 0, 0, 0)' && bc !== 'transparent') {
-                    var mx = bc.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                    if (mx) return mx[1] + ',' + mx[2] + ',' + mx[3];
-                  }
-                  b = b.parentElement;
-                }
-                var cv = getComputedStyle(ht).getPropertyValue('--background');
-                if (cv) {
-                  var mv = cv.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                  if (mv) return mv[1] + ',' + mv[2] + ',' + mv[3];
-                }
-                var bg = getComputedStyle(ht).backgroundColor;
-                if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
-                  var mg = bg.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-                  if (mg) return mg[1] + ',' + mg[2] + ',' + mg[3];
-                }
-              } catch (e) {}
-              return '255,255,255';
+      # ============================================================
+      # STEP 1: Create Swift source with ALL debug features
+      # Using heredoc with quotes to prevent shell expansion
+      # ============================================================
+      cat > app.swift << 'SWIFT_EOF'
+
+import UIKit
+import WebKit
+import AVFoundation
+// MARK: - Debug Console
+class DebugConsoleVC: UIViewController {
+var textView: UITextView!
+static var sharedLogs: [String] = []
+static let logQueue = DispatchQueue(label: "log.queue", qos: .utility)
+override func viewDidLoad() {
+    super.viewDidLoad()
+    setupUI()
+    refreshLogs()
+}
+
+func setupUI() {
+    view.backgroundColor = UIColor.black.withAlphaComponent(0.95)
+    
+    let titleLabel = UILabel()
+    titleLabel.text = "🔧 GLM Debug Console"
+    titleLabel.textColor = .white
+    titleLabel.font = UIFont.boldSystemFont(ofSize: 16)
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    view.addSubview(titleLabel)
+    
+    let buttonStack = UIStackView()
+    buttonStack.axis = .horizontal
+    buttonStack.distribution = .fillEqually
+    buttonStack.spacing = 8
+    buttonStack.translatesAutoresizingMaskIntoConstraints = false
+    
+    let copyBtn = createButton("📋 Copy All", color: .systemBlue)
+    copyBtn.addTarget(self, action: #selector(copyAllLogs), for: .touchUpInside)
+    
+    let shareBtn = createButton("📤 Share", color: .systemGreen)
+    shareBtn.addTarget(self, action: #selector(shareLogs), for: .touchUpInside)
+    
+    let clearBtn = createButton("🗑 Clear", color: .systemRed)
+    clearBtn.addTarget(self, action: #selector(clearLogs), for: .touchUpInside)
+    
+    let closeBtn = createButton("❌ Close", color: .systemGray)
+    closeBtn.addTarget(self, action: #selector(closeConsole), for: .touchUpInside)
+    
+    buttonStack.addArrangedSubview(copyBtn)
+    buttonStack.addArrangedSubview(shareBtn)
+    buttonStack.addArrangedSubview(clearBtn)
+    buttonStack.addArrangedSubview(closeBtn)
+    view.addSubview(buttonStack)
+    
+    textView = UITextView()
+    textView.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.08, alpha: 1.0)
+    textView.textColor = .green
+    textView.font = UIFont(name: "Menlo", size: 10) ?? UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+    textView.isEditable = false
+    textView.translatesAutoresizingMaskIntoConstraints = false
+    textView.layer.borderColor = UIColor.darkGray.cgColor
+    textView.layer.borderWidth = 1
+    view.addSubview(textView)
+    
+    Timer.scheduledTimer(timeInterval: 0.5, target: self, selector: #selector(refreshLogs), userInfo: nil, repeats: true)
+    
+    NSLayoutConstraint.activate([
+        titleLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+        titleLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+        buttonStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+        buttonStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+        buttonStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+        buttonStack.heightAnchor.constraint(equalToConstant: 36),
+        textView.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 8),
+        textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+        textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
+        textView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4)
+    ])
+}
+
+func createButton(_ title: String, color: UIColor) -> UIButton {
+    let btn = UIButton(type: .system)
+    btn.setTitle(title, for: .normal)
+    btn.backgroundColor = color.withAlphaComponent(0.3)
+    btn.setTitleColor(.white, for: .normal)
+    btn.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+    btn.layer.cornerRadius = 6
+    btn.layer.borderWidth = 1
+    btn.layer.borderColor = color.cgColor
+    return btn
+}
+
+@objc func refreshLogs() {
+    DebugConsoleVC.logQueue.sync {
+        let logText = DebugConsoleVC.sharedLogs.joined(separator: "\n")
+        DispatchQueue.main.async {
+            self.textView.text = logText
+            if self.textView.text.count > 0 {
+                let bottom = NSMakeRange(self.textView.text.count - 1, 1)
+                self.textView.scrollRangeToVisible(bottom)
             }
-            
-            function sendColor() {
-              try {
-                var c = getTopColor();
-                if (c === lastColor) {
-                  stableCount++;
-                  if (stableCount >= 2 && c !== sentColor) {
-                    sentColor = c;
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.themeHandler) {
-                      window.webkit.messageHandlers.themeHandler.postMessage(c);
+        }
+    }
+}
+
+@objc func copyAllLogs() {
+    DebugConsoleVC.logQueue.sync {
+        UIPasteboard.general.string = DebugConsoleVC.sharedLogs.joined(separator: "\n")
+    }
+    showToast("✅ All logs copied!")
+}
+
+@objc func shareLogs() {
+    DebugConsoleVC.logQueue.sync {
+        let allLogs = DebugConsoleVC.sharedLogs.joined(separator: "\n")
+        let activityVC = UIActivityViewController(activityItems: [allLogs], applicationActivities: nil)
+        DispatchQueue.main.async { self.present(activityVC, animated: true) }
+    }
+}
+
+@objc func clearLogs() {
+    DebugConsoleVC.logQueue.async { DebugConsoleVC.sharedLogs.removeAll() }
+    showToast("🗑 Logs cleared")
+    refreshLogs()
+}
+
+@objc func closeConsole() {
+    dismiss(animated: true)
+}
+
+func showToast(_ message: String) {
+    let toast = UILabel()
+    toast.text = message
+    toast.backgroundColor = UIColor.white.withAlphaComponent(0.9)
+    toast.textColor = .black
+    toast.textAlignment = .center
+    toast.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+    toast.layer.cornerRadius = 8
+    toast.clipsToBounds = true
+    toast.translatesAutoresizingMaskIntoConstraints = false
+    view.addSubview(toast)
+    NSLayoutConstraint.activate([
+        toast.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+        toast.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        toast.widthAnchor.constraint(equalToConstant: 260),
+        toast.heightAnchor.constraint(equalToConstant: 44)
+    ])
+    UIView.animate(withDuration: 0.3, delay: 1.5, options: .curveEaseOut, animations: { toast.alpha = 0 }) { _ in toast.removeFromSuperview() }
+}
+
+static func addLog(_ level: String, _ message: String, source: String? = nil, line: Int? = nil, column: Int? = nil) {
+    let df = DateFormatter()
+    df.dateFormat = "HH:mm:ss.SSS"
+    let ts = df.string(from: Date())
+    var line_str = "[\(ts)] [\(level)]"
+    if let s = source { line_str += " [\(s)]" }
+    if let l = line { line_str += ":\(l)" }
+    if let c = column { line_str += ":\(c)" }
+    line_str += " \(message)"
+    logQueue.async {
+        sharedLogs.append(line_str)
+        if sharedLogs.count > 5000 { sharedLogs.removeFirst(sharedLogs.count - 5000) }
+    }
+    print(line_str)
+}
+
+}
+// MARK: - Main View Controller
+class VC: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
+var wv: WKWebView!
+var debugButton: UIButton!
+var lastColor = "255,255,255"
+var stableCount = 0
+var sb = false
+var loadStartTime: Date?
+override var preferredStatusBarStyle: UIStatusBarStyle {
+    return sb ? .lightContent : .darkContent
+}
+
+override func viewDidLoad() {
+    super.viewDidLoad()
+    
+    DebugConsoleVC.addLog("INFO", "=== GLM Debug App v1.0 Starting ===")
+    DebugConsoleVC.addLog("INFO", "iOS: \(UIDevice.current.systemVersion)")
+    DebugConsoleVC.addLog("INFO", "Device: \(UIDevice.current.model)")
+    DebugConsoleVC.addLog("INFO", "Screen: \(UIScreen.main.bounds.size)")
+    
+    view.backgroundColor = UIColor.white
+    sb = false
+    
+    AVCaptureDevice.requestAccess(for: .audio) { g in
+        DebugConsoleVC.addLog("INFO", "Mic permission: \(g)")
+    }
+    
+    let cfg = WKWebViewConfiguration()
+    cfg.userContentController.add(self, name: "themeHandler")
+    cfg.userContentController.add(self, name: "debugLog")
+    cfg.userContentController.add(self, name: "debugError")
+    cfg.userContentController.add(self, name: "debugNetwork")
+    cfg.userContentController.add(self, name: "debugReady")
+    cfg.userContentController.add(self, name: "patchScript")
+    cfg.userContentController.add(self, name: "whiteScreen")
+    cfg.allowsInlineMediaPlayback = true
+    cfg.mediaTypesRequiringUserActionForPlayback = []
+    cfg.preferences.javaScriptEnabled = true
+    if #available(iOS 14.0, *) {
+        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+    }
+    
+    // Theme detection JS - injected at document start
+    let themeJS = """
+    (function(){
+        var lastColor='255,255,255',stableCount=0;
+        function getTopColor(){
+            try{
+                var s=['header','nav','[class*=header]','.app-header','.navbar','[class*=navbar]','.top-bar','.header-bar','[class*=topbar]'];
+                for(var i=0;i<s.length;i++){
+                    var el=document.querySelector(s[i]);
+                    if(el){
+                        var r=el.getBoundingClientRect();
+                        if(r.top<=5&&r.height>20){
+                            var c=getComputedStyle(el).backgroundColor;
+                            var m=c.match(/(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
+                            if(m&&c!=='rgba(0, 0, 0, 0)'&&c!=='transparent') return m[1]+','+m[2]+','+m[3];
+                        }
                     }
-                  }
-                } else {
-                  lastColor = c;
-                  stableCount = 1;
                 }
-              } catch (e) {}
-            }
-            
+                var b=document.body;
+                if(b){
+                    var bc=getComputedStyle(b).backgroundColor;
+                    var bm=bc.match(/(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
+                    if(bm&&bm[1]!=='0') return bm[1]+','+bm[2]+','+bm[3];
+                }
+                var h=document.documentElement;
+                if(h){
+                    var hc=getComputedStyle(h).backgroundColor;
+                    var hm=hc.match(/(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
+                    if(hm&&hm[1]!=='0') return hm[1]+','+hm[2]+','+hm[3];
+                }
+            }catch(e){}
+            return '255,255,255';
+        }
+        function sendColor(){
+            var color=getTopColor();
+            if(color===lastColor){stableCount++;if(stableCount>=2){window.webkit.messageHandlers.themeHandler.postMessage(color);}}
+            else{lastColor=color;stableCount=0;}
+        }
+        sendColor();
+        setInterval(sendColor,400);
+        var obs=new MutationObserver(function(){sendColor();});
+        var htmlObs=new MutationObserver(function(){sendColor();});
+        if(document.body) obs.observe(document.body,{attributes:true,childList:true,subtree:true});
+        htmlObs.observe(document.documentElement,{attributes:true});
+        document.addEventListener('DOMContentLoaded',function(){
+            if(document.body) obs.observe(document.body,{attributes:true,childList:true,subtree:true});
             sendColor();
-            var intervalId = setInterval(sendColor, 400);
-            
-            var obs;
-            try {
-              obs = new MutationObserver(function(mutations) {
-                var shouldSend = false;
-                for (var i = 0; i < mutations.length; i++) {
-                  var m = mutations[i];
-                  if (m.type === 'attributes' && (m.attributeName === 'class' || m.attributeName === 'style')) {
-                    shouldSend = true;
-                  } else if (m.type === 'childList') {
-                    shouldSend = true;
-                  }
-                }
-                if (shouldSend) sendColor();
-              });
-              obs.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
-            } catch (e) {}
-            
-            function observeBody() {
-              if (document.body) {
-                try {
-                  obs.observe(document.body, { attributes: true, childList: true, subtree: true });
-                } catch (e) {}
-              } else {
-                setTimeout(observeBody, 100);
-              }
-            }
-            observeBody();
-            
-            document.addEventListener('visibilitychange', function() {
-              if (document.hidden) {
-                clearInterval(intervalId);
-              } else {
-                intervalId = setInterval(sendColor, 400);
-                sendColor();
-              }
+        });
+    })();
+    """
+    
+    // ULTIMATE DEBUG JS - captures everything
+    let debugJS = """
+    (function(){
+        function sendLog(level,msg,src,ln,col){
+            try{window.webkit.messageHandlers.debugLog.postMessage({level:level,message:String(msg),source:src||'',line:ln||0,column:col||0});}catch(e){}
+        }
+        var origLog=console.log,origWarn=console.warn,origError=console.error,origInfo=console.info,origDebug=console.debug;
+        console.log=function(){var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return String(x);}).join(' ');sendLog('LOG',m);origLog.apply(console,arguments);};
+        console.warn=function(){var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return String(x);}).join(' ');sendLog('WARN',m);origWarn.apply(console,arguments);};
+        console.error=function(){var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return String(x);}).join(' ');sendLog('ERROR',m);origError.apply(console,arguments);};
+        console.info=function(){var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return String(x);}).join(' ');sendLog('INFO',m);origInfo.apply(console,arguments);};
+        console.debug=function(){var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return String(x);}).join(' ');sendLog('DEBUG',m);origDebug.apply(console,arguments);};
+        
+        window.addEventListener('error',function(e){
+            sendLog('FATAL','ERROR: '+e.message+' at '+e.filename+':'+e.lineno+':'+e.colno);
+            sendLog('FATAL','Stack: '+(e.error&&e.error.stack?e.error.stack:'N/A'));
+            try{window.webkit.messageHandlers.debugError.postMessage({message:e.message,filename:e.filename,lineno:e.lineno,colno:e.colno,stack:e.error&&e.error.stack?e.error.stack:''});}catch(ex){}
+        });
+        window.addEventListener('unhandledrejection',function(e){
+            sendLog('FATAL','Unhandled Promise: '+e.reason);
+            try{window.webkit.messageHandlers.debugError.postMessage({message:'Unhandled Promise: '+String(e.reason),filename:'',lineno:0,colno:0,stack:''});}catch(ex){}
+        });
+        
+        var origFetch=window.fetch;
+        window.fetch=function(url,opts){
+            sendLog('NETWORK','FETCH START: '+url);
+            var start=Date.now();
+            return origFetch.apply(this,arguments).then(function(r){
+                sendLog('NETWORK','FETCH DONE: '+url+' status='+r.status+' time='+(Date.now()-start)+'ms');
+                return r;
+            }).catch(function(e){
+                sendLog('NETWORK','FETCH FAIL: '+url+' error='+e.message);
+                throw e;
             });
-          })();
-          THEMEEOF
+        };
+        
+        var origXHR=window.XMLHttpRequest;
+        window.XMLHttpRequest=function(){
+            var xhr=new origXHR();
+            var origOpen=xhr.open,url='';
+            xhr.open=function(method,u){url=u;sendLog('NETWORK','XHR START: '+method+' '+u);return origOpen.apply(xhr,arguments);};
+            xhr.addEventListener('load',function(){sendLog('NETWORK','XHR DONE: '+url+' status='+xhr.status);});
+            xhr.addEventListener('error',function(){sendLog('NETWORK','XHR FAIL: '+url);});
+            return xhr;
+        };
+        
+        var origAppend=Element.prototype.appendChild;
+        Element.prototype.appendChild=function(node){
+            if(node.tagName==='SCRIPT'){sendLog('SCRIPT','Loading: '+(node.src||'(inline)'));} 
+            return origAppend.apply(this,arguments);
+        };
+        
+        document.addEventListener('readystatechange',function(){sendLog('LIFECYCLE','readyState: '+document.readyState);});
+        document.addEventListener('DOMContentLoaded',function(){sendLog('LIFECYCLE','DOMContentLoaded');});
+        window.addEventListener('load',function(){sendLog('LIFECYCLE','Window load');});
+        
+        // White screen detection
+        setTimeout(function(){
+            var body=document.body,html=document.documentElement;
+            if(!body||!html){sendLog('WHITESCREEN','NO BODY/HTML!');}
+            else{
+                sendLog('WHITESCREEN','Body children: '+body.children.length);
+                var cs=getComputedStyle(body);
+                sendLog('WHITESCREEN','bg:'+cs.backgroundColor+' display:'+cs.display+' vis:'+cs.visibility);
+                if(body.children.length===0){sendLog('WHITESCREEN','EMPTY BODY - white screen!');}
+            }
+            try{window.webkit.messageHandlers.whiteScreen.postMessage({children:body?body.children.length:-1});}catch(e){}
+        },3000);
+        setTimeout(function(){
+            var body=document.body;
+            if(body&&body.children.length===0){sendLog('WHITESCREEN','STILL EMPTY after 8s!');}
+        },8000);
+        
+        sendLog('INFO','UA: '+navigator.userAgent);
+        sendLog('INFO','WebKit: '+(navigator.userAgent.match(/AppleWebKit\/([0-9.]+)/)||['','?'])[1]);
+        
+        // iOS 15 polyfills
+        if(!window.WeakRef){sendLog('PATCH','WeakRef polyfill');window.WeakRef=function(t){this._t=t;};window.WeakRef.prototype.deref=function(){return this._t;};}
+        if(!window.FinalizationRegistry){sendLog('PATCH','FinalizationRegistry stub');window.FinalizationRegistry=function(){};window.FinalizationRegistry.prototype.register=function(){};window.FinalizationRegistry.prototype.unregister=function(){return false;};}
+        
+        try{window.webkit.messageHandlers.debugReady.postMessage({ready:true});}catch(e){}
+        sendLog('INFO','=== Debug ready ===');
+    })();
+    """
+    
+    cfg.userContentController.addUserScript(WKUserScript(source: themeJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+    cfg.userContentController.addUserScript(WKUserScript(source: debugJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+    
+    wv = WKWebView(frame: .zero, configuration: cfg)
+    wv.translatesAutoresizingMaskIntoConstraints = false
+    wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+    wv.uiDelegate = self
+    wv.navigationDelegate = self
+    if #available(iOS 16.4, *) { wv.isInspectable = true }
+    
+    view.addSubview(wv)
+    
+    // Debug button - red floating button
+    debugButton = UIButton(type: .system)
+    debugButton.setTitle("🐛", for: .normal)
+    debugButton.titleLabel?.font = UIFont.systemFont(ofSize: 24)
+    debugButton.backgroundColor = UIColor.red.withAlphaComponent(0.85)
+    debugButton.layer.cornerRadius = 25
+    debugButton.layer.shadowColor = UIColor.black.cgColor
+    debugButton.layer.shadowOffset = CGSize(width: 0, height: 3)
+    debugButton.layer.shadowRadius = 5
+    debugButton.layer.shadowOpacity = 0.6
+    debugButton.translatesAutoresizingMaskIntoConstraints = false
+    debugButton.addTarget(self, action: #selector(showDebugConsole), for: .touchUpInside)
+    let pan = UIPanGestureRecognizer(target: self, action: #selector(dragDebugBtn(_:)))
+    debugButton.addGestureRecognizer(pan)
+    view.addSubview(debugButton)
+    
+    NSLayoutConstraint.activate([
+        wv.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        wv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        debugButton.widthAnchor.constraint(equalToConstant: 50),
+        debugButton.heightAnchor.constraint(equalToConstant: 50),
+        debugButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+        debugButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 60)
+    ])
+    
+    let targetURL = "https://chat.z.ai"
+    DebugConsoleVC.addLog("INFO", "Loading: \(targetURL)")
+    loadStartTime = Date()
+    wv.load(URLRequest(url: URL(string: targetURL)!))
+}
 
-      - name: Write patches.js (Minimal ES2020+ Patches for iOS 15)
-        run: |
-          cat > Payload/GLM.app/patches.js <<'PATCHEOF'
-          (function(){
-            'use strict';
-            
-            // Only run on iOS 15.x
-            var match = navigator.userAgent.match(/OS (\d+)_(\d+)/);
-            if (!match) return;
-            var major = parseInt(match[1], 10);
-            if (major > 15) return;
-            
-            // ====== ES2021+ POLYFILLS (only if missing) ======
-            
-            if (!Promise.any) {
-              Promise.any = function(iterable) {
-                return new Promise(function(resolve, reject) {
-                  var errors = [];
-                  var pending = 0;
-                  var first = true;
-                  function check() {
-                    if (!first && pending === 0) {
-                      reject(new AggregateError(errors, "All promises were rejected"));
+@objc func dragDebugBtn(_ gesture: UIPanGestureRecognizer) {
+    let t = gesture.translation(in: view)
+    if let b = gesture.view { b.center = CGPoint(x: b.center.x + t.x, y: b.center.y + t.y) }
+    gesture.setTranslation(.zero, in: view)
+}
+
+@objc func showDebugConsole() {
+    let d = DebugConsoleVC()
+    d.modalPresentationStyle = .overFullScreen
+    present(d, animated: true)
+}
+
+func injectPatches() {
+    let patchJS = """
+    (function(){
+        console.log('[PATCH] Applying iOS 15 patches...');
+        
+        // MediaQueryList polyfill
+        (function(w){
+            var p=null;
+            if(w.MediaQueryList) p=w.MediaQueryList.prototype;
+            else if(typeof w.matchMedia==='function'){var m=w.matchMedia('all');p=Object.getPrototypeOf(m);}
+            if(!p) return;
+            var wm=new WeakMap();
+            p.addEventListener=p.addEventListener||function(t,l){
+                if(t!=='change') return;
+                if(typeof l==='function'){p.addListener.call(this,l);}
+                else{var wr=wm.get(l);if(!wr){wr=function(ev){l.handleEvent(ev);};wm.set(l,wr);}p.addListener.call(this,wr);}
+            };
+            p.removeEventListener=p.removeEventListener||function(t,l){
+                if(t!=='change') return;
+                if(typeof l==='function'){p.removeListener.call(this,l);}
+                else{var wr=wm.get(l);if(!wr) return;p.removeListener.call(this,wr);}
+            };
+        })(window);
+        
+        // Element.animate sanitizer
+        (function(){
+            var na=Element.prototype.animate;
+            if(typeof na!=='function') return;
+            Element.prototype.animate=function(kf,opts){
+                try{return na.call(this,kf,opts);}
+                catch(e){
+                    try{
+                        var s={};
+                        if(opts&&typeof opts==='object'){
+                            for(var k in opts){
+                                if(k==='easing'&&typeof opts[k]==='string') s[k]='linear';
+                                else if(k!=='composite'&&k!=='pseudoElement'&&k!=='iterationComposite') s[k]=opts[k];
+                            }
+                        }
+                        return na.call(this,kf,s);
+                    }catch(e2){
+                        return {finished:Promise.resolve(),ready:Promise.resolve(),playState:'finished',play:function(){},pause:function(){},finish:function(){},cancel:function(){},reverse:function(){},persist:function(){},commitStyles:function(){},updatePlaybackRate:function(){},addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return false;}};
                     }
-                  }
-                  for (var _i = 0; _i < iterable.length; _i++) {
-                    (function(item) {
-                      pending++;
-                      Promise.resolve(item).then(resolve, function(err) {
-                        errors.push(err);
-                        pending--;
-                        check();
-                      });
-                    })(iterable[_i]);
-                  }
-                  first = false;
-                  check();
-                });
-              };
-            }
-            
-            if (!String.prototype.replaceAll) {
-              String.prototype.replaceAll = function(search, replacement) {
-                if (typeof search === 'string') {
-                  return this.split(search).join(replacement);
                 }
-                return this.replace(new RegExp(search.source, search.flags.replace('g', '') + 'g'), replacement);
-              };
-            }
-            
-            if (!Array.prototype.at) {
-              Array.prototype.at = function(index) {
-                if (index < 0) index = this.length + index;
-                return this[index];
-              };
-            }
-            
-            if (!Object.hasOwn) {
-              Object.hasOwn = function(obj, prop) {
-                return Object.prototype.hasOwnProperty.call(obj, prop);
-              };
-            }
-            
-            if (!Array.prototype.toSorted) {
-              Array.prototype.toSorted = function(compareFn) { return this.slice().sort(compareFn); };
-            }
-            if (!Array.prototype.toReversed) {
-              Array.prototype.toReversed = function() { return this.slice().reverse(); };
-            }
-            if (!Array.prototype.findLast) {
-              Array.prototype.findLast = function(predicate) {
-                for (var i = this.length - 1; i >= 0; i--) {
-                  if (predicate(this[i], i, this)) return this[i];
+            };
+        })();
+        
+        // fetch traceparent cleanup
+        (function(){
+            var nf=window.fetch.bind(window);
+            window.fetch=function(url,opts){
+                if(opts&&opts.headers){
+                    if(opts.headers instanceof Headers){opts.headers.delete('traceparent');opts.headers.delete('tracestate');}
+                    else if(typeof opts.headers==='object'&&!Array.isArray(opts.headers)){delete opts.headers.traceparent;delete opts.headers.tracestate;}
                 }
-                return undefined;
-              };
-            }
-            if (!Array.prototype.findLastIndex) {
-              Array.prototype.findLastIndex = function(predicate) {
-                for (var i = this.length - 1; i >= 0; i--) {
-                  if (predicate(this[i], i, this)) return i;
-                }
-                return -1;
-              };
-            }
-            
-            if (!Promise.withResolvers) {
-              Promise.withResolvers = function() {
-                var resolve, reject;
-                var promise = new Promise(function(res, rej) { resolve = res; reject = rej; });
-                return { promise: promise, resolve: resolve, reject: reject };
-              };
-            }
-            
-            // ====== WEB API POLYFILLS ======
-            
-            if (typeof WeakRef === 'undefined') {
-              window.WeakRef = function(target) { this._target = target; };
-              WeakRef.prototype.deref = function() { return this._target; };
-            }
-            
-            if (typeof FinalizationRegistry === 'undefined') {
-              window.FinalizationRegistry = function() {};
-              FinalizationRegistry.prototype.register = function() {};
-              FinalizationRegistry.prototype.unregister = function() {};
-            }
-            
-            if (typeof structuredClone === 'undefined') {
-              window.structuredClone = function(value) { return JSON.parse(JSON.stringify(value)); };
-            }
-            
-            if (typeof AbortSignal !== 'undefined' && !AbortSignal.timeout) {
-              AbortSignal.timeout = function(ms) {
-                var controller = new AbortController();
-                setTimeout(function() { controller.abort(); }, ms);
-                return controller.signal;
-              };
-            }
-            
-            if (typeof ResizeObserver === 'undefined') {
-              window.ResizeObserver = function(callback) { this._callback = callback; };
-              ResizeObserver.prototype.observe = function() {};
-              ResizeObserver.prototype.unobserve = function() {};
-              ResizeObserver.prototype.disconnect = function() {};
-            }
-            
-            if (!window.requestIdleCallback) {
-              window.requestIdleCallback = function(cb) {
-                return setTimeout(function() {
-                  cb({ didTimeout: false, timeRemaining: function() { return 50; } });
-                }, 1);
-              };
-              window.cancelIdleCallback = function(id) { clearTimeout(id); };
-            }
-            
-            if (!window.queueMicrotask) {
-              window.queueMicrotask = function(callback) {
-                Promise.resolve().then(callback).catch(function(e) {
-                  setTimeout(function() { throw e; });
-                });
-              };
-            }
-            
-            // ====== PATCH FETCH (remove trace headers) ======
-            var _nativeFetch = window.fetch.bind(window);
-            function _cleanFetch(url, opts) {
-              if (opts && opts.headers) {
-                try {
-                  if (opts.headers instanceof Headers) {
-                    opts.headers.delete('traceparent');
-                    opts.headers.delete('tracestate');
-                  } else if (typeof opts.headers === 'object' && !Array.isArray(opts.headers)) {
-                    delete opts.headers.traceparent;
-                    delete opts.headers.tracestate;
-                  }
-                } catch (e) {}
-              }
-              return _nativeFetch(url, opts);
-            }
-            Object.defineProperty(window, 'fetch', {
-              configurable: false, enumerable: true,
-              get: function() { return _cleanFetch; },
-              set: function() {}
-            });
-            
-            // ====== PATCH ANIMATE (Web Animations API) ======
-            function sanitizeOptions(o) {
-              if (typeof o !== 'object' || o === null) return o;
-              var c = {};
-              for (var k in o) { if (o.hasOwnProperty(k)) c[k] = o[k]; }
-              if (typeof c.easing === 'string') c.easing = 'linear';
-              delete c.composite;
-              delete c.pseudoElement;
-              delete c.iterationComposite;
-              return c;
-            }
-            function noopAnimation() {
-              var noop = function() {};
-              var rf = function() {};
-              var finished = new Promise(function(r) { rf = r; });
-              var anim = {
-                finished: finished, ready: finished, playState: 'finished',
-                currentTime: 0, startTime: 0, playbackRate: 1, pending: false,
-                replaceState: 'active', timeline: null, effect: null, id: '',
-                onfinish: null, oncancel: null, onremove: null,
-                play: noop, pause: noop, finish: noop, cancel: noop,
-                reverse: noop, persist: noop, commitStyles: noop,
-                updatePlaybackRate: noop, addEventListener: noop,
-                removeEventListener: noop, dispatchEvent: function() { return false; },
-                overallProgress: null
-              };
-              rf(anim);
-              return anim;
-            }
-            if (typeof Element !== 'undefined') {
-              var proto = Element.prototype;
-              var nativeAnimate = proto.animate;
-              if (typeof nativeAnimate === 'function') {
-                proto.animate = function(keyframes, options2) {
-                  try { return nativeAnimate.call(this, keyframes, options2); }
-                  catch (e) {
-                    try { return nativeAnimate.call(this, keyframes, sanitizeOptions(options2)); }
-                    catch (e2) { return noopAnimation(); }
-                  }
-                };
-              }
-            }
-            
-            // ====== MediaQueryList polyfill ======
-            (function(w) {
-              function getProto() {
-                if (w.MediaQueryList) return w.MediaQueryList.prototype;
-                if (typeof w.matchMedia === 'function') {
-                  var mql = w.matchMedia('all');
-                  return Object.getPrototypeOf(mql);
-                }
-              }
-              var proto = getProto();
-              if (!proto) return;
-              var wrappers = new WeakMap();
-              if (!proto.addEventListener) {
-                proto.addEventListener = function(type, listener) {
-                  if (type !== 'change') return;
-                  if (typeof listener === 'function') {
-                    proto.addListener.call(this, listener);
-                  } else {
-                    var wrapper = wrappers.get(listener);
-                    if (!wrapper) {
-                      wrapper = function(ev) { listener.handleEvent(ev); };
-                      wrappers.set(listener, wrapper);
-                    }
-                    proto.addListener.call(this, wrapper);
-                  }
-                };
-              }
-              if (!proto.removeEventListener) {
-                proto.removeEventListener = function(type, listener) {
-                  if (type !== 'change') return;
-                  if (typeof listener === 'function') {
-                    proto.removeListener.call(this, listener);
-                  } else {
-                    var wrapper = wrappers.get(listener);
-                    if (!wrapper) return;
-                    proto.removeListener.call(this, wrapper);
-                  }
-                };
-              }
-            })(window);
-            
-            if (!console.debug) { console.debug = console.log; }
-          })();
-          PATCHEOF
+                return nf(url,opts);
+            };
+        })();
+        
+        console.log('[PATCH] Done');
+    })();
+    """
+    wv.evaluateJavaScript(patchJS) { _, err in
+        if let e = err { DebugConsoleVC.addLog("PATCH", "Error: \(e.localizedDescription)") }
+        else { DebugConsoleVC.addLog("PATCH", "Patches applied") }
+    }
+}
 
-      - name: Write Swift app code
-        run: |
-          cat > app.swift <<'SWIFTEOF'
-          import UIKit
-          import WebKit
-          import AVFoundation
+// Navigation delegate
+func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+    DebugConsoleVC.addLog("NAV", "Load started")
+}
+func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    DebugConsoleVC.addLog("NAV", "Committed")
+}
+func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    let lt = loadStartTime != nil ? String(format: "%.2f", Date().timeIntervalSince(loadStartTime!)) : "?"
+    DebugConsoleVC.addLog("NAV", "Loaded in \(lt)s")
+    injectPatches()
+}
+func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    DebugConsoleVC.addLog("NAV", "FAIL: \(error.localizedDescription)")
+}
+func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    DebugConsoleVC.addLog("NAV", "PROVISIONAL FAIL: \(error.localizedDescription)")
+}
 
-          class VC: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
-              var wv: WKWebView!
-              var sb = false
-              
-              override var preferredStatusBarStyle: UIStatusBarStyle {
-                  return sb ? .lightContent : .darkContent
-              }
-              
-              override var prefersStatusBarHidden: Bool {
-                  return false
-              }
-              
-              override func viewDidLoad() {
-                  super.viewDidLoad()
-                  view.backgroundColor = UIColor.white
-                  sb = false
-                  
-                  AVCaptureDevice.requestAccess(for: .audio) { _ in }
-                  
-                  let c = WKWebViewConfiguration()
-                  c.userContentController.add(self, name: "themeHandler")
-                  c.allowsInlineMediaPlayback = true
-                  c.mediaTypesRequiringUserActionForPlayback = []
-                  c.preferences.javaScriptEnabled = true
-                  c.defaultWebpagePreferences.allowsContentJavaScript = true
-                  
-                  // Theme JS at documentStart (needs to catch color before render)
-                  if let themePath = Bundle.main.path(forResource: "theme", ofType: "js"),
-                     let themeJS = try? String(contentsOfFile: themePath, encoding: .utf8) {
-                      c.userContentController.addUserScript(WKUserScript(
-                          source: themeJS,
-                          injectionTime: .atDocumentStart,
-                          forMainFrameOnly: false
-                      ))
-                  }
-                  
-                  // Patches at documentEnd (safer for SPAs - don't interfere with site loading)
-                  if let patchPath = Bundle.main.path(forResource: "patches", ofType: "js"),
-                     let patchJS = try? String(contentsOfFile: patchPath, encoding: .utf8) {
-                      c.userContentController.addUserScript(WKUserScript(
-                          source: patchJS,
-                          injectionTime: .atDocumentEnd,
-                          forMainFrameOnly: false
-                      ))
-                  }
-                  
-                  wv = WKWebView(frame: .zero, configuration: c)
-                  wv.translatesAutoresizingMaskIntoConstraints = false
-                  wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
-                  wv.uiDelegate = self
-                  wv.navigationDelegate = self
-                  wv.allowsBackForwardNavigationGestures = true
-                  wv.scrollView.contentInsetAdjustmentBehavior = .never
-                  
-                  view.addSubview(wv)
-                  NSLayoutConstraint.activate([
-                      wv.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-                      wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                      wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                      wv.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-                  ])
-                  
-                  if let url = URL(string: "https://chat.z.ai") {
-                      var request = URLRequest(url: url)
-                      request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-                      wv.load(request)
-                  }
-              }
-              
-              func userContentController(_ u: WKUserContentController, didReceive m: WKScriptMessage) {
-                  if m.name == "themeHandler" {
-                      if let rgb = m.body as? String {
-                          let p = rgb.split(separator: ",").compactMap { Int($0) }
-                          guard p.count >= 3 else { return }
-                          let R = CGFloat(p[0]) / 255.0
-                          let G = CGFloat(p[1]) / 255.0
-                          let B = CGFloat(p[2]) / 255.0
-                          view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
-                          let luminance = (0.299 * CGFloat(p[0]) + 0.587 * CGFloat(p[1]) + 0.114 * CGFloat(p[2])) / 255.0
-                          if luminance < 0.45 { sb = true }
-                          else if luminance > 0.55 { sb = false }
-                          setNeedsStatusBarAppearanceUpdate()
-                      }
-                  }
-              }
-              
-              func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-                  completionHandler()
-              }
-              
-              func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-                  completionHandler(true)
-              }
-              
-              func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-                  completionHandler(defaultText)
-              }
-              
-              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                  if navigationAction.targetFrame == nil {
-                      webView.load(navigationAction.request)
-                      decisionHandler(.cancel)
-                      return
-                  }
-                  decisionHandler(.allow)
-              }
-              
-              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-                  if let url = navigationAction.request.url {
-                      UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                  }
-                  return nil
-              }
-              
-              func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-                  print("Navigation failed: \\(error)")
-              }
-              
-              func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-                  print("Provisional navigation failed: \\(error)")
-              }
-          }
+// Message handler
+func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+    switch message.name {
+    case "themeHandler":
+        if let rgb = message.body as? String {
+            let p = rgb.split(separator: ",").compactMap { Int($0) }
+            guard p.count >= 3 else { return }
+            view.backgroundColor = UIColor(red: CGFloat(p[0])/255.0, green: CGFloat(p[1])/255.0, blue: CGFloat(p[2])/255.0, alpha: 1.0)
+            let lum = (0.299*CGFloat(p[0]) + 0.587*CGFloat(p[1]) + 0.114*CGFloat(p[2])) / 255.0
+            if lum < 0.45 { sb = true } else if lum > 0.55 { sb = false }
+            setNeedsStatusBarAppearanceUpdate()
+        }
+    case "debugLog":
+        if let d = message.body as? [String: Any] {
+            DebugConsoleVC.addLog(d["level"] as? String ?? "LOG", d["message"] as? String ?? "", source: d["source"] as? String, line: d["line"] as? Int, column: d["column"] as? Int)
+        } else if let s = message.body as? String {
+            DebugConsoleVC.addLog("LOG", s)
+        }
+    case "debugError":
+        if let d = message.body as? [String: Any] {
+            DebugConsoleVC.addLog("FATAL", "JS: \(d["message"] as? String ?? "?")", source: d["filename"] as? String, line: d["lineno"] as? Int)
+            if let st = d["stack"] as? String, !st.isEmpty { DebugConsoleVC.addLog("FATAL", "Stack: \(st)") }
+        }
+    case "debugNetwork":
+        if let d = message.body as? [String: Any] {
+            DebugConsoleVC.addLog("NETWORK", d["message"] as? String ?? "")
+        }
+    case "debugReady":
+        DebugConsoleVC.addLog("INFO", "Debug JS ready")
+    case "whiteScreen":
+        if let d = message.body as? [String: Any] {
+            DebugConsoleVC.addLog("WHITESCREEN", "Body children: \(d["children"] as? Int ?? -1)")
+        }
+    case "patchScript":
+        if let code = message.body as? String {
+            DebugConsoleVC.addLog("PATCH", "Script (\(code.count) chars)")
+            wv.evaluateJavaScript(code) { _, e in if let e = e { DebugConsoleVC.addLog("PATCH", "Exec error: \(e.localizedDescription)") } }
+        }
+    default:
+        DebugConsoleVC.addLog("WARN", "Unknown: \(message.name)")
+    }
+}
 
-          class AD: UIResponder, UIApplicationDelegate {
-              var w: UIWindow?
-              func application(_ a: UIApplication, didFinishLaunchingWithOptions l: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-                  w = UIWindow(frame: UIScreen.main.bounds)
-                  w?.rootViewController = VC()
-                  w?.makeKeyAndVisible()
-                  return true
-              }
-          }
+// JS Dialogs
+func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+    DebugConsoleVC.addLog("JS-ALERT", message); completionHandler()
+}
+func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+    DebugConsoleVC.addLog("JS-CONFIRM", message); completionHandler(true)
+}
+func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+    DebugConsoleVC.addLog("JS-PROMPT", "\(prompt)"); completionHandler(defaultText)
+}
 
-          UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AD.self))
-          SWIFTEOF
+}
+// MARK: - App Delegate
+class AD: UIResponder, UIApplicationDelegate {
+var w: UIWindow?
+func application(_ a: UIApplication, didFinishLaunchingWithOptions l: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+w = UIWindow(frame: UIScreen.main.bounds)
+w?.rootViewController = VC()
+w?.makeKeyAndVisible()
+return true
+}
+}
+UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AD.self))
+SWIFT_EOF
+      # ============================================================
+      # STEP 2: Compile the Swift code
+      # ============================================================
+      SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+      xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/GLM.app/GLM app.swift
+      chmod +x Payload/GLM.app/GLM
+      
+      # ============================================================
+      # STEP 3: Create Info.plist
+      # ============================================================
+      cat > Payload/GLM.app/Info.plist << 'PLIST_EOF'
 
-      - name: Compile Swift
-        run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/GLM.app/GLM app.swift
-          chmod +x Payload/GLM.app/GLM
+      printf 'APPL????' > Payload/GLM.app/PkgInfo
+      
+      # ============================================================
+      # STEP 4: Create app icon using Python (proper PNG)
+      # ============================================================
+      python3 << 'PYEOF'
 
-      - name: Create Info.plist
-        run: |
-          cat > Payload/GLM.app/Info.plist <<'PLISTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key><string>GLM</string>
-            <key>CFBundleIdentifier</key><string>com.z.ai.glm</string>
-            <key>CFBundleName</key><string>GLM</string>
-            <key>CFBundleDisplayName</key><string>GLM</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>1.0</string>
-            <key>CFBundleVersion</key><string>1</string>
-            <key>LSRequiresIPhoneOS</key><true/>
-            <key>MinimumOSVersion</key><string>15.0</string>
-            <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-            <key>UISupportedInterfaceOrientations</key>
-            <array>
-              <string>UIInterfaceOrientationPortrait</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-            </array>
-            <key>UIViewControllerBasedStatusBarAppearance</key><true/>
-            <key>CFBundleIcons</key>
-            <dict>
-              <key>CFBundlePrimaryIcon</key>
-              <dict>
-                <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
-                <key>CFBundleIconName</key><string>AppIcon</string>
-              </dict>
-            </dict>
-            <key>NSMicrophoneUsageDescription</key><string>GLM needs microphone for voice input.</string>
-            <key>NSCameraUsageDescription</key><string>GLM needs camera for image uploads.</string>
-            <key>NSLocationWhenInUseUsageDescription</key><string>GLM needs location for AI features.</string>
-            <key>NSPhotoLibraryUsageDescription</key><string>GLM needs photo library for image uploads.</string>
-            <key>NSPhotoLibraryAddUsageDescription</key><string>GLM needs to save images to your photo library.</string>
-            <key>NSFaceIDUsageDescription</key><string>GLM uses Face ID for secure authentication.</string>
-            <key>UIBackgroundModes</key>
-            <array>
-              <string>audio</string>
-              <string>fetch</string>
-            </array>
-            <key>WKAppBoundDomains</key>
-            <array>
-              <string>chat.z.ai</string>
-              <string>z.ai</string>
-              <string>cdn.z.ai</string>
-              <string>api.z.ai</string>
-            </array>
-          </dict>
-          </plist>
-          PLISTEOF
+import struct, zlib
+def png_chunk(chunk_type, data):
+chunk = chunk_type + data
+crc = zlib.crc32(chunk) & 0xffffffff
+return struct.pack('>I', len(data)) + chunk + struct.pack('>I', crc)
+def create_png(width, height, r, g, b):
+signature = b'\x89PNG\r\n\x1a\n'
+# IHDR
+ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+ihdr = png_chunk(b'IHDR', ihdr_data)
 
-      - name: Create PkgInfo
-        run: printf 'APPL????' > Payload/GLM.app/PkgInfo
+# IDAT - create raw RGB data with filter bytes
+raw = b''
+for y in range(height):
+    raw += b'\x00'  # Filter: None
+    for x in range(width):
+        raw += bytes([r, g, b])
 
-      - name: Create IPA
-        run: zip -r GLM.ipa Payload
+compressed = zlib.compress(raw, 9)
+idat = png_chunk(b'IDAT', compressed)
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: GLM-IPA
-          path: GLM.ipa
+# IEND
+iend = png_chunk(b'IEND', b'')
+
+return signature + ihdr + idat + iend
+
+Green icon for GLM
+png_120 = create_png(120, 120, 76, 175, 80)
+with open('Payload/GLM.app/AppIcon60x60@2x.png', 'wb') as f:
+f.write(png_120)
+png_180 = create_png(180, 180, 76, 175, 80)
+with open('Payload/GLM.app/AppIcon60x60@3x.png', 'wb') as f:
+f.write(png_180)
+Also create 76x76 and 152x152 for iPad
+png_76 = create_png(76, 76, 76, 175, 80)
+with open('Payload/GLM.app/AppIcon76x76.png', 'wb') as f:
+f.write(png_76)
+png_152 = create_png(152, 152, 76, 175, 80)
+with open('Payload/GLM.app/AppIcon76x76@2x.png', 'wb') as f:
+f.write(png_152)
+print("Icons created successfully")
+PYEOF
+      # ============================================================
+      # STEP 5: Create IPA
+      # ============================================================
+      zip -r GLM-Debug.ipa Payload
+      ls -la Payload/GLM.app/
+      
+  - uses: actions/upload-artifact@v4
+    with:
+      name: GLM-Debug-IPA
+      path: GLM-Debug.ipa
+
+----
+🐛 How to Report Errors
+After installing via TrollStore:
+1.  Open the app and wait for the white screen (or whatever happens)
+2.  Tap the red 🐛 button (top-right, draggable)
+3.  Tap "📋 Copy All" to copy all logs to clipboard
+4.  Paste the logs here and I'll analyze them to create the patched final app
+The debug console captures:
+•  [INFO] — General info, UA, WebKit version
+•  [NAV] — Page load events
+•  [LOG/WARN/ERROR/DEBUG] — All console output
+•  [FATAL] — JS errors with stack traces
+•  [NETWORK] — Every fetch/XHR request
+•  [SCRIPT] — Every script being loaded
+•  [LIFECYCLE] — DOM readyState changes
+•  [WHITESCREEN] — Body children count, computed styles
+•  [PATCH] — Polyfill injection status
