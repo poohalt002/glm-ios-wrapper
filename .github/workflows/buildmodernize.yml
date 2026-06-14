@@ -1,4 +1,4 @@
-name: Build Modernize Browser (Full Features, Stable)
+name: Build Modernize Browser (Full Features, No Compiler Errors)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create JS patches (full polyfills + LegacyTranspiler loader)
+      - name: Create JS patches
         run: |
           mkdir -p patches
           
@@ -227,7 +227,7 @@ jobs:
             fi
           done
 
-      - name: Generate full-featured Swift source
+      - name: Generate fully fixed Swift source
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -253,7 +253,6 @@ jobs:
               var title: String
               var url: String
               var isPrivate: Bool
-              var backForwardListData: Data? // Not used, we recreate webview
           }
           
           // MARK: - User Agent Manager
@@ -419,8 +418,13 @@ jobs:
               
               func updateCurrentTab(title: String, url: String) {
                   guard currentIndex < currentTabs.count else { return }
-                  currentTabs[currentIndex].title = title
-                  currentTabs[currentIndex].url = url
+                  if privateMode {
+                      privateTabs[currentIndex].title = title
+                      privateTabs[currentIndex].url = url
+                  } else {
+                      tabs[currentIndex].title = title
+                      tabs[currentIndex].url = url
+                  }
               }
               
               func closeTab(at index: Int) {
@@ -447,8 +451,8 @@ jobs:
               }
           }
           
-          // MARK: - Main Browser ViewController
-          class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate, WKDownloadDelegate {
+          // MARK: - Main Browser ViewController (no WKDownloadDelegate conformance)
+          class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
               
               var webView: WKWebView!
               var urlTextField: UITextField!
@@ -835,8 +839,7 @@ jobs:
               }
           }
           
-          // MARK: - App Delegate
-          @main
+          // MARK: - App Delegate (no @main)
           class AppDelegate: UIResponder, UIApplicationDelegate {
               var window: UIWindow?
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
@@ -846,6 +849,8 @@ jobs:
                   return true
               }
           }
+          
+          UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AppDelegate.self))
           SWIFT
 
       - name: Compile Swift
@@ -897,5 +902,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Modernize-Full-Features
+          name: Modernize-Full-Features-Fixed
           path: Modernize.ipa
