@@ -1,4 +1,4 @@
-name: Build Modernize Browser (Final – Smooth Animations)
+name: Build Modernize Browser (Separate JS files)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create JS patches
+      - name: Create base polyfills and loader (small files)
         run: |
           mkdir -p patches
           
@@ -99,140 +99,22 @@ jobs:
           })();
           LOADER_EOF
           
-          # Placeholder for legacy-transpiler-enhanced.js – user must provide actual file
-          if [ ! -f patches/legacy-transpiler-enhanced.js ]; then
-            cat > patches/legacy-transpiler-enhanced.js << 'ENHANCED_EOF'
-            (function(global) {
-              // ES2020-2025 polyfills and Web API fixes for iOS 15
-              if (typeof global.globalThis === 'undefined') global.globalThis = global;
-              if (typeof Promise.allSettled !== 'function') {
-                Promise.allSettled = function(promises) {
-                  return Promise.all(promises.map(function(p) {
-                    return Promise.resolve(p).then(function(v) { return { status: 'fulfilled', value: v }; },
-                                              function(r) { return { status: 'rejected', reason: r }; });
-                  }));
-                };
-              }
-              if (typeof String.prototype.matchAll !== 'function') {
-                String.prototype.matchAll = function(regexp) {
-                  var flags = regexp.flags;
-                  if (!flags.includes('g')) flags += 'g';
-                  var rx = new RegExp(regexp.source, flags);
-                  var matches = [];
-                  var match;
-                  while ((match = rx.exec(this)) !== null) matches.push(match);
-                  return matches[Symbol.iterator]();
-                };
-              }
-              if (typeof BigInt === 'undefined') global.BigInt = function(v) { return Number(v); };
-              if (typeof Promise.any !== 'function') {
-                Promise.any = function(promises) {
-                  return new Promise(function(resolve, reject) {
-                    var errors = [];
-                    var pending = promises.length;
-                    if (pending === 0) reject(new AggregateError([], 'All promises were rejected'));
-                    for (var i = 0; i < promises.length; i++) {
-                      Promise.resolve(promises[i]).then(resolve, function(err) {
-                        errors[i] = err;
-                        if (--pending === 0) reject(new AggregateError(errors, 'All promises were rejected'));
-                      });
-                    }
-                  });
-                };
-              }
-              if (typeof AggregateError === 'undefined') {
-                global.AggregateError = function(errors, message) {
-                  var e = new Error(message);
-                  e.errors = errors;
-                  e.name = 'AggregateError';
-                  return e;
-                };
-              }
-              if (typeof WeakRef === 'undefined') global.WeakRef = function(value) { return { deref: function() { return value; } }; };
-              if (typeof FinalizationRegistry === 'undefined') global.FinalizationRegistry = function() { return { register: function() {}, unregister: function() {} }; };
-              if (typeof Array.prototype.findLast !== 'function') {
-                Array.prototype.findLast = function(predicate, thisArg) {
-                  for (var i = this.length - 1; i >= 0; i--) if (predicate.call(thisArg, this[i], i, this)) return this[i];
-                  return undefined;
-                };
-              }
-              if (typeof Array.prototype.findLastIndex !== 'function') {
-                Array.prototype.findLastIndex = function(predicate, thisArg) {
-                  for (var i = this.length - 1; i >= 0; i--) if (predicate.call(thisArg, this[i], i, this)) return i;
-                  return -1;
-                };
-              }
-              if (typeof Array.prototype.toReversed !== 'function') Array.prototype.toReversed = function() { return this.slice().reverse(); };
-              if (typeof Array.prototype.toSorted !== 'function') Array.prototype.toSorted = function(cmp) { return this.slice().sort(cmp); };
-              if (typeof Array.prototype.toSpliced !== 'function') {
-                Array.prototype.toSpliced = function(start, deleteCount) {
-                  var args = Array.prototype.slice.call(arguments);
-                  var copy = this.slice();
-                  copy.splice.apply(copy, args);
-                  return copy;
-                };
-              }
-              if (typeof Array.prototype.with !== 'function') Array.prototype.with = function(idx, val) { var copy = this.slice(); copy[idx] = val; return copy; };
-              if (typeof Promise.withResolvers !== 'function') {
-                Promise.withResolvers = function() {
-                  var resolve, reject;
-                  var promise = new Promise(function(res, rej) { resolve = res; reject = rej; });
-                  return { promise: promise, resolve: resolve, reject: reject };
-                };
-              }
-              if (global.Atomics && typeof Atomics.waitAsync !== 'function') Atomics.waitAsync = function() { return Promise.reject(new Error('Not supported')); };
-              if (typeof global.structuredClone !== 'function') global.structuredClone = function(obj) { return JSON.parse(JSON.stringify(obj)); };
-              var originalFetch = global.fetch;
-              if (originalFetch) {
-                global.fetch = function(url, options) {
-                  if (options && options.headers) {
-                    var headers = new Headers(options.headers);
-                    headers.delete('traceparent');
-                    headers.delete('tracestate');
-                    options.headers = headers;
-                  }
-                  return originalFetch(url, options);
-                };
-              }
-              if (global.MediaQueryList && !global.MediaQueryList.prototype.addEventListener) {
-                var proto = global.MediaQueryList.prototype;
-                var wrappers = new WeakMap();
-                proto.addEventListener = function(type, listener) {
-                  if (type !== 'change') return;
-                  if (typeof listener === 'function') proto.addListener.call(this, listener);
-                  else {
-                    var wrapper = wrappers.get(listener);
-                    if (!wrapper) { wrapper = function(ev) { listener.handleEvent(ev); }; wrappers.set(listener, wrapper); }
-                    proto.addListener.call(this, wrapper);
-                  }
-                };
-                proto.removeEventListener = function(type, listener) {
-                  if (type !== 'change') return;
-                  if (typeof listener === 'function') proto.removeListener.call(this, listener);
-                  else {
-                    var wrapper = wrappers.get(listener);
-                    if (wrapper) proto.removeListener.call(this, wrapper);
-                  }
-                };
-              }
-              if (typeof global.queueMicrotask !== 'function') global.queueMicrotask = function(cb) { Promise.resolve().then(cb); };
-              console.log('[Enhanced Transpiler] Loaded – ES2020-2025 polyfills active');
-            })(window);
-            ENHANCED_EOF
-          fi
-          
-          echo "Patches created"
+          echo "Base patches created"
 
-      - name: Create app bundle
+      - name: Create app bundle and copy all JS files
         run: |
           APP_NAME="Modernize"
           mkdir -p Payload/${APP_NAME}.app
+          # Copy EVERY .js file from patches/ into the app bundle
           cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
+          # Copy icons if present
           for icon in Icon-60@2x.png Icon-60@3x.png Icon-76.png Icon-76@2x.png; do
             if [ -f "$icon" ]; then cp "$icon" Payload/${APP_NAME}.app/; fi
           done
+          echo "Copied JS files:"
+          ls -la Payload/${APP_NAME}.app/*.js
 
-      - name: Generate final Swift source (with smooth animations)
+      - name: Generate Swift source (smooth animations, swipe, aero)
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -288,7 +170,7 @@ jobs:
               }
           }
           
-          // MARK: - History, Bookmarks, DownloadManager (shortened)
+          // MARK: - History, Bookmarks, DownloadManager
           class HistoryManager {
               static let shared = HistoryManager(); private let defaults = UserDefaults.standard; private let key = "browser_history"
               var history: [HistoryEntry] { get { guard let data = defaults.data(forKey: key), let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }; return entries } set { if let data = try? JSONEncoder().encode(Array(newValue.prefix(500))) { defaults.set(data, forKey: key) } } }
@@ -342,7 +224,6 @@ jobs:
               var bottomToolbar: UIVisualEffectView!
               var bottomConstraint: NSLayoutConstraint!
               var toolbarHidden = false
-              var swipeStartPoint: CGPoint = .zero
               private var animator: UIViewPropertyAnimator?
               
               override func viewDidLoad() {
@@ -363,6 +244,7 @@ jobs:
                   config.allowsInlineMediaPlayback = true
                   config.mediaTypesRequiringUserActionForPlayback = []
                   let bundle = Bundle.main
+                  // Load all JS files from bundle: polyfills, loader, and both transpilers
                   for file in ["polyfills", "loader", "legacy-transpiler", "legacy-transpiler-enhanced"] {
                       if let path = bundle.path(forResource: file, ofType: "js"), let js = try? String(contentsOfFile: path) {
                           config.userContentController.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -458,7 +340,6 @@ jobs:
                   bottomConstraint.isActive = true
               }
               
-              // MARK: - Swipe gestures with smooth animation
               func setupSwipeGestures() {
                   let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeUp))
                   swipeUp.direction = .up
@@ -488,7 +369,6 @@ jobs:
                   animator?.startAnimation()
               }
               
-              // MARK: - Keyboard handling with smooth animations
               func setupKeyboardHandling() {
                   NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification, object: nil)
                   NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification, object: nil)
@@ -518,7 +398,6 @@ jobs:
               
               @objc func dismissKeyboard() { urlTextField.resignFirstResponder() }
               
-              // MARK: - Navigation & UI actions
               func loadURL(_ url: URL) {
                   webView.customUserAgent = UserAgentManager.shared.userAgentForURL(url)
                   webView.load(URLRequest(url: url))
@@ -764,5 +643,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Modernize-Smooth-Final
+          name: Modernize-Separate-JS-Final
           path: Modernize.ipa
