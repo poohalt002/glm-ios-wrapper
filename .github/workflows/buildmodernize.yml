@@ -1,4 +1,3 @@
-```yaml
 name: Build Modernize Browser (iOS 15 Stable - No Download Conflict)
 
 on:
