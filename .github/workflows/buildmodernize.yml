@@ -1,4 +1,4 @@
-name: Build Modernize Browser (Final Aero + Polyfills)
+name: Build Modernize Browser (Swipe Fullscreen + Enhanced Transpiler)
 
 on:
   workflow_dispatch:
@@ -11,101 +11,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create enhanced polyfills and loader
+      - name: Create base polyfills and loader
         run: |
           mkdir -p patches
           
           cat > patches/polyfills.js << 'POLYFILLS_EOF'
-          // Comprehensive ES2020-2025 polyfills for iOS 15
-          (function(global) {
-            // globalThis
-            if (typeof global.globalThis === 'undefined') {
-              global.globalThis = global;
-            }
-            
-            // Promise.allSettled (ES2020)
-            if (typeof Promise.allSettled !== 'function') {
-              Promise.allSettled = function(promises) {
-                return Promise.all(promises.map(function(p) {
-                  return Promise.resolve(p).then(function(value) {
-                    return { status: 'fulfilled', value: value };
-                  }, function(reason) {
-                    return { status: 'rejected', reason: reason };
-                  });
-                }));
-              };
-            }
-            
-            // Array.prototype.flat (ES2019)
-            if (!Array.prototype.flat) {
-              Array.prototype.flat = function(depth) {
-                var depthArg = depth === undefined ? 1 : Math.floor(depth);
-                if (depthArg < 1) return Array.prototype.slice.call(this);
-                return this.reduce(function(acc, val) {
-                  return acc.concat(Array.isArray(val) ? val.flat(depthArg - 1) : val);
-                }, []);
-              };
-            }
-            
-            // Array.prototype.flatMap (ES2019)
-            if (!Array.prototype.flatMap) {
-              Array.prototype.flatMap = function(callback, thisArg) {
-                return this.map(callback, thisArg).flat();
-              };
-            }
-            
-            // Object.fromEntries (ES2019)
-            if (!Object.fromEntries) {
-              Object.fromEntries = function(entries) {
-                var obj = {};
-                for (var i = 0; i < entries.length; i++) {
-                  var entry = entries[i];
-                  obj[entry[0]] = entry[1];
-                }
-                return obj;
-              };
-            }
-            
-            // String.prototype.trimStart / trimEnd (ES2019)
-            if (!String.prototype.trimStart) {
-              String.prototype.trimStart = function() {
-                return this.replace(/^\s+/, '');
-              };
-            }
-            if (!String.prototype.trimEnd) {
-              String.prototype.trimEnd = function() {
-                return this.replace(/\s+$/, '');
-              };
-            }
-            
-            // Optional chaining and nullish coalescing are syntax – handled by transpiler
-            
-            // WeakRef and FinalizationRegistry (no-op for older engines)
-            if (typeof WeakRef === 'undefined') {
-              global.WeakRef = function(value) { return { deref: function() { return value; } }; };
-            }
-            if (typeof FinalizationRegistry === 'undefined') {
-              global.FinalizationRegistry = function() { return { register: function() {}, unregister: function() {} }; };
-            }
-            
-            // Atomics.waitAsync (no-op)
-            if (global.Atomics && !global.Atomics.waitAsync) {
-              global.Atomics.waitAsync = function() { return Promise.reject(new Error('Not supported')); };
-            }
+          // Basic polyfills (already safe)
+          (function(global){
+            if (!global.queueMicrotask) global.queueMicrotask = function(cb){ Promise.resolve().then(cb); };
+            if (!Array.prototype.at) Array.prototype.at = function(idx){ var len=this.length,i=idx>=0?idx:len+idx; return (i<0||i>=len)?undefined:this[i]; };
+            if (!String.prototype.at) String.prototype.at = function(idx){ var len=this.length,i=idx>=0?idx:len+idx; return (i<0||i>=len)?undefined:this[i]; };
+            if (!Object.hasOwn) Object.hasOwn = function(obj,prop){ return Object.prototype.hasOwnProperty.call(obj,prop); };
+            if (!String.prototype.replaceAll) String.prototype.replaceAll = function(s,r){ if(typeof s==="string")return this.split(s).join(r); if(s instanceof RegExp){if(!s.global)throw new TypeError("Global RegExp required"); return this.replace(s,r);} return this.replace(s,r); };
           })(window);
           POLYFILLS_EOF
           
           cat > patches/loader.js << 'LOADER_EOF'
-          (function() {
+          (function(){
             var iosMatch = navigator.userAgent.match(/OS (\d+)_(\d+)/);
             var iosVersion = iosMatch ? iosMatch[1] + "." + iosMatch[2] : "15.0";
             var cache = new Map();
-            
             if (typeof window.LegacyTranspiler === "undefined") {
-              console.warn("LegacyTranspiler not loaded – some modern JS may fail");
+              console.warn("LegacyTranspiler not loaded");
               return;
             }
-            
             window.LegacyTranspiler.init({
               BASE_URL: window.location.origin,
               runScript: function(code) {
@@ -119,7 +48,6 @@ jobs:
               target: { platform: "iOS", version: iosVersion },
               minify: true
             });
-            
             var processedScripts = new Set();
             var observer = new MutationObserver(function(mutations) {
               for (var i = 0; i < mutations.length; i++) {
@@ -157,7 +85,6 @@ jobs:
               }
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
-            
             setTimeout(function() {
               var scripts = document.querySelectorAll("script:not([data-processed])");
               for (var i = 0; i < scripts.length; i++) {
@@ -173,26 +100,20 @@ jobs:
           })();
           LOADER_EOF
           
-          # Placeholder for legacy-transpiler.js – user must provide actual file
-          if [ ! -f patches/legacy-transpiler.js ]; then
-            echo "// LegacyTranspiler placeholder – replace with real file" > patches/legacy-transpiler.js
-          fi
-          
           echo "Patches created"
 
-      - name: Create app bundle
+      - name: Create app bundle and copy all JS patches
         run: |
           APP_NAME="Modernize"
           mkdir -p Payload/${APP_NAME}.app
+          # Copy all JS files from patches/
           cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
-          
+          # Copy icons if present
           for icon in Icon-60@2x.png Icon-60@3x.png Icon-76.png Icon-76@2x.png; do
-            if [ -f "$icon" ]; then
-              cp "$icon" Payload/${APP_NAME}.app/
-            fi
+            if [ -f "$icon" ]; then cp "$icon" Payload/${APP_NAME}.app/; fi
           done
 
-      - name: Generate final Swift with aero UI (buttons below URL bar)
+      - name: Generate Swift source (with swipe gestures and aero toolbar)
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -203,32 +124,24 @@ jobs:
           struct HistoryEntry: Codable { var id = UUID(); var title: String; var url: String; var date: Date }
           struct TabState: Codable { var id = UUID(); var title: String; var url: String; var isPrivate: Bool }
           
-          // MARK: - User Agent Manager, History, Bookmarks, Download Manager (unchanged, same as last working version)
+          // MARK: - User Agent Manager
           class UserAgentManager {
               static let shared = UserAgentManager()
               private let defaults = UserDefaults.standard
               enum UAMode: Int, CaseIterable {
                   case ios26 = 0, ios15 = 1, googleFix = 2, custom = 3
-                  var displayName: String {
-                      switch self { case .ios26: return "iOS 26"; case .ios15: return "iOS 15"; case .googleFix: return "Google Fix"; case .custom: return "Custom" }
-                  }
+                  var displayName: String { switch self { case .ios26: return "iOS 26"; case .ios15: return "iOS 15"; case .googleFix: return "Google Fix"; case .custom: return "Custom" } }
                   var userAgentString: String {
                       switch self {
                       case .ios26: return "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
                       case .ios15: return "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
                       case .googleFix: return "https://accounts.google.com"
-                      case .custom: return UserDefaults.standard.string(forKey: "custom_ua") ?? "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+                      case .custom: return defaults.string(forKey: "custom_ua") ?? "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
                       }
                   }
               }
-              var currentMode: UAMode {
-                  get { return UAMode(rawValue: defaults.integer(forKey: "ua_mode")) ?? .ios26 }
-                  set { defaults.set(newValue.rawValue, forKey: "ua_mode") }
-              }
-              var customUA: String {
-                  get { return defaults.string(forKey: "custom_ua") ?? "" }
-                  set { defaults.set(newValue, forKey: "custom_ua") }
-              }
+              var currentMode: UAMode { get { return UAMode(rawValue: defaults.integer(forKey: "ua_mode")) ?? .ios26 } set { defaults.set(newValue.rawValue, forKey: "ua_mode") } }
+              var customUA: String { get { return defaults.string(forKey: "custom_ua") ?? "" } set { defaults.set(newValue, forKey: "custom_ua") } }
               func userAgentForURL(_ url: URL?) -> String {
                   guard let host = url?.host?.lowercased() else { return currentMode.userAgentString }
                   if host.contains("accounts.google.com") { return UAMode.googleFix.userAgentString }
@@ -237,33 +150,21 @@ jobs:
               }
           }
           
+          // MARK: - History, Bookmarks, Download Manager (shortened)
           class HistoryManager {
-              static let shared = HistoryManager()
-              private let defaults = UserDefaults.standard
-              private let key = "browser_history"
-              var history: [HistoryEntry] {
-                  get { guard let data = defaults.data(forKey: key), let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }; return entries }
-                  set { if let data = try? JSONEncoder().encode(Array(newValue.prefix(500))) { defaults.set(data, forKey: key) } }
-              }
+              static let shared = HistoryManager(); private let defaults = UserDefaults.standard; private let key = "browser_history"
+              var history: [HistoryEntry] { get { guard let data = defaults.data(forKey: key), let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }; return entries } set { if let data = try? JSONEncoder().encode(Array(newValue.prefix(500))) { defaults.set(data, forKey: key) } } }
               func addEntry(title: String, url: String) { var current = history; current.removeAll { $0.url == url }; current.insert(HistoryEntry(title: title, url: url, date: Date()), at: 0); history = current }
               func clear() { history = [] }
           }
-          
           class BookmarkManager {
-              static let shared = BookmarkManager()
-              private let defaults = UserDefaults.standard
-              private let key = "browser_bookmarks"
-              var bookmarks: [Bookmark] {
-                  get { guard let data = defaults.data(forKey: key), let items = try? JSONDecoder().decode([Bookmark].self, from: data) else { return [] }; return items }
-                  set { if let data = try? JSONEncoder().encode(newValue) { defaults.set(data, forKey: key) } }
-              }
+              static let shared = BookmarkManager(); private let defaults = UserDefaults.standard; private let key = "browser_bookmarks"
+              var bookmarks: [Bookmark] { get { guard let data = defaults.data(forKey: key), let items = try? JSONDecoder().decode([Bookmark].self, from: data) else { return [] }; return items } set { if let data = try? JSONEncoder().encode(newValue) { defaults.set(data, forKey: key) } } }
               func add(title: String, url: String) { var current = bookmarks; current.removeAll { $0.url == url }; current.insert(Bookmark(title: title, url: url, dateAdded: Date()), at: 0); bookmarks = current }
               func remove(at index: Int) { var current = bookmarks; current.remove(at: index); bookmarks = current }
           }
-          
           class DownloadManager: NSObject, WKDownloadDelegate {
-              static let shared = DownloadManager()
-              private override init() { super.init(); createFolder() }
+              static let shared = DownloadManager(); private override init() { super.init(); createFolder() }
               private func createFolder() { let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!; let folder = docs.appendingPathComponent("Modernize"); if !FileManager.default.fileExists(atPath: folder.path) { try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) } }
               private func folder() -> URL { return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("Modernize") }
               @available(iOS 15.0, *) func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? { return folder().appendingPathComponent(suggestedFilename) }
@@ -271,16 +172,12 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { }
           }
           
+          // MARK: - Tab Manager
           class TabManager {
-              static let shared = TabManager()
-              private init() {}
-              var tabs: [TabState] = []
-              var privateTabs: [TabState] = []
-              var privateMode: Bool = false
-              var currentIndex: Int = 0
+              static let shared = TabManager(); private init() {}
+              var tabs: [TabState] = []; var privateTabs: [TabState] = []; var privateMode = false; var currentIndex = 0
               var currentTabs: [TabState] { return privateMode ? privateTabs : tabs }
               var currentTab: TabState? { guard currentIndex < currentTabs.count else { return nil }; return currentTabs[currentIndex] }
-              
               func addTab(url: String? = nil, title: String = "New Tab", isPrivate: Bool = false) {
                   let newTab = TabState(title: title, url: url ?? "https://www.google.com", isPrivate: isPrivate)
                   if isPrivate { privateTabs.append(newTab); currentIndex = privateTabs.count - 1 }
@@ -292,45 +189,30 @@ jobs:
                   else { tabs[currentIndex].title = title; tabs[currentIndex].url = url }
               }
               func closeTab(at index: Int) {
-                  if privateMode {
-                      privateTabs.remove(at: index)
-                      if privateTabs.isEmpty { addTab(isPrivate: true) }
-                      if currentIndex >= privateTabs.count { currentIndex = privateTabs.count - 1 }
-                  } else {
-                      tabs.remove(at: index)
-                      if tabs.isEmpty { addTab() }
-                      if currentIndex >= tabs.count { currentIndex = tabs.count - 1 }
-                  }
+                  if privateMode { privateTabs.remove(at: index); if privateTabs.isEmpty { addTab(isPrivate: true) }; if currentIndex >= privateTabs.count { currentIndex = privateTabs.count - 1 } }
+                  else { tabs.remove(at: index); if tabs.isEmpty { addTab() }; if currentIndex >= tabs.count { currentIndex = tabs.count - 1 } }
               }
-              func clearAll() {
-                  if privateMode { privateTabs.removeAll(); addTab(isPrivate: true) }
-                  else { tabs.removeAll(); addTab() }
-                  currentIndex = 0
-              }
+              func clearAll() { if privateMode { privateTabs.removeAll(); addTab(isPrivate: true) } else { tabs.removeAll(); addTab() }; currentIndex = 0 }
           }
           
-          // MARK: - Main Browser ViewController with Aero UI (URL bar on top, buttons below)
+          // MARK: - Main Browser ViewController with swipe gestures and aero toolbar
           class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
-              
               var webView: WKWebView!
               var urlTextField: UITextField!
-              var backButton: UIButton!
-              var forwardButton: UIButton!
-              var reloadButton: UIButton!
-              var tabsButton: UIButton!
-              var menuButton: UIButton!
+              var backButton, forwardButton, reloadButton, tabsButton, menuButton: UIButton!
               var progressView: UIProgressView!
-              var bottomToolbar: UIVisualEffectView! // Blur for aero
+              var bottomToolbar: UIVisualEffectView!
               var bottomConstraint: NSLayoutConstraint!
+              var toolbarHidden = false
+              var swipeStartPoint: CGPoint = .zero
               
               override func viewDidLoad() {
                   super.viewDidLoad()
                   view.backgroundColor = UIColor.systemBackground
-                  
                   setupWebView()
                   setupUI()
                   setupKeyboardHandling()
-                  
+                  setupSwipeGestures()
                   if TabManager.shared.tabs.isEmpty { TabManager.shared.addTab() }
                   loadCurrentTab()
               }
@@ -341,21 +223,18 @@ jobs:
                   let config = WKWebViewConfiguration()
                   config.allowsInlineMediaPlayback = true
                   config.mediaTypesRequiringUserActionForPlayback = []
-                  
                   let bundle = Bundle.main
-                  for file in ["polyfills", "loader", "legacy-transpiler"] {
-                      if let path = bundle.path(forResource: file, ofType: "js"), let js = try? String(contentsOfFile: path, encoding: .utf8) {
+                  for file in ["polyfills", "loader", "legacy-transpiler", "legacy-transpiler-enhanced"] {
+                      if let path = bundle.path(forResource: file, ofType: "js"), let js = try? String(contentsOfFile: path) {
                           config.userContentController.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
                       }
                   }
-                  
                   webView = WKWebView(frame: .zero, configuration: config)
                   webView.translatesAutoresizingMaskIntoConstraints = false
                   webView.navigationDelegate = self
                   webView.uiDelegate = self
                   webView.allowsBackForwardNavigationGestures = true
                   view.addSubview(webView)
-                  
                   webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: .new, context: nil)
               }
               
@@ -371,16 +250,15 @@ jobs:
                   progressView.progressTintColor = UIColor.systemBlue
                   view.addSubview(progressView)
                   
-                  // Aero bottom toolbar with blur
-                  let blurEffect = UIBlurEffect(style: .systemChromeMaterial)
-                  bottomToolbar = UIVisualEffectView(effect: blurEffect)
+                  // Aero toolbar: blur effect with system material (adapts to light/dark)
+                  let blur = UIBlurEffect(style: .systemChromeMaterial)
+                  bottomToolbar = UIVisualEffectView(effect: blur)
                   bottomToolbar.translatesAutoresizingMaskIntoConstraints = false
                   bottomToolbar.layer.cornerRadius = 16
                   bottomToolbar.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
                   bottomToolbar.clipsToBounds = true
                   view.addSubview(bottomToolbar)
                   
-                  // URL text field (at top of toolbar)
                   urlTextField = UITextField()
                   urlTextField.translatesAutoresizingMaskIntoConstraints = false
                   urlTextField.placeholder = "Search or enter URL"
@@ -394,7 +272,6 @@ jobs:
                   urlTextField.clearButtonMode = .whileEditing
                   bottomToolbar.contentView.addSubview(urlTextField)
                   
-                  // Button stack (5 buttons: back, forward, reload, tabs, menu) - placed below URL field
                   let buttonStack = UIStackView()
                   buttonStack.translatesAutoresizingMaskIntoConstraints = false
                   buttonStack.axis = .horizontal
@@ -410,45 +287,60 @@ jobs:
                       b.tintColor = UIColor.label
                       return b
                   }
-                  
                   backButton = btn("chevron.left", #selector(goBack))
                   forwardButton = btn("chevron.right", #selector(goForward))
                   reloadButton = btn("arrow.clockwise", #selector(reload))
                   tabsButton = btn("square.on.square", #selector(showTabSwitcher))
                   menuButton = btn("ellipsis", #selector(showMenu))
-                  
                   [backButton, forwardButton, reloadButton, tabsButton, menuButton].forEach { buttonStack.addArrangedSubview($0) }
                   
-                  // Layout: URL field on top, buttons below, with padding
                   NSLayoutConstraint.activate([
                       webView.topAnchor.constraint(equalTo: view.topAnchor),
                       webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                       webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       webView.bottomAnchor.constraint(equalTo: bottomToolbar.topAnchor),
-                      
                       progressView.topAnchor.constraint(equalTo: webView.bottomAnchor),
                       progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                       progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       progressView.heightAnchor.constraint(equalToConstant: 2),
-                      
                       bottomToolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                       bottomToolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       bottomToolbar.heightAnchor.constraint(equalToConstant: 100),
-                      
                       urlTextField.topAnchor.constraint(equalTo: bottomToolbar.contentView.topAnchor, constant: 8),
                       urlTextField.leadingAnchor.constraint(equalTo: bottomToolbar.contentView.leadingAnchor, constant: 16),
                       urlTextField.trailingAnchor.constraint(equalTo: bottomToolbar.contentView.trailingAnchor, constant: -16),
                       urlTextField.heightAnchor.constraint(equalToConstant: 40),
-                      
                       buttonStack.topAnchor.constraint(equalTo: urlTextField.bottomAnchor, constant: 4),
                       buttonStack.leadingAnchor.constraint(equalTo: bottomToolbar.contentView.leadingAnchor, constant: 20),
                       buttonStack.trailingAnchor.constraint(equalTo: bottomToolbar.contentView.trailingAnchor, constant: -20),
                       buttonStack.bottomAnchor.constraint(equalTo: bottomToolbar.contentView.bottomAnchor, constant: -8),
                       buttonStack.heightAnchor.constraint(equalToConstant: 44)
                   ])
-                  
                   bottomConstraint = bottomToolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
                   bottomConstraint.isActive = true
+              }
+              
+              func setupSwipeGestures() {
+                  let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeUp))
+                  swipeUp.direction = .up
+                  webView.addGestureRecognizer(swipeUp)
+                  let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeDown))
+                  swipeDown.direction = .down
+                  webView.addGestureRecognizer(swipeDown)
+              }
+              
+              @objc func handleSwipeUp() {
+                  guard !toolbarHidden else { return }
+                  toolbarHidden = true
+                  bottomConstraint.constant = -bottomToolbar.bounds.height
+                  UIView.animate(withDuration: 0.25) { self.view.layoutIfNeeded() }
+              }
+              
+              @objc func handleSwipeDown() {
+                  guard toolbarHidden else { return }
+                  toolbarHidden = false
+                  bottomConstraint.constant = 0
+                  UIView.animate(withDuration: 0.25) { self.view.layoutIfNeeded() }
               }
               
               func setupKeyboardHandling() {
@@ -459,16 +351,16 @@ jobs:
                   webView.addGestureRecognizer(tap)
               }
               
-              @objc func keyboardWillShow(_ notification: Notification) {
-                  guard let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-                  let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-                  bottomConstraint.constant = -keyboardFrame.height + view.safeAreaInsets.bottom
+              @objc func keyboardWillShow(_ n: Notification) {
+                  guard let frame = n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                  let duration = n.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                  bottomConstraint.constant = -frame.height + view.safeAreaInsets.bottom
                   UIView.animate(withDuration: duration) { self.view.layoutIfNeeded() }
               }
               
-              @objc func keyboardWillHide(_ notification: Notification) {
-                  let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-                  bottomConstraint.constant = 0
+              @objc func keyboardWillHide(_ n: Notification) {
+                  let duration = n.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                  bottomConstraint.constant = toolbarHidden ? -bottomToolbar.bounds.height : 0
                   UIView.animate(withDuration: duration) { self.view.layoutIfNeeded() }
               }
               
@@ -489,7 +381,7 @@ jobs:
               @objc func goForward() { webView.goForward() }
               @objc func reload() { if webView.isLoading { webView.stopLoading() } else { webView.reload() } }
               
-              @objc func showTabSwitcher() { /* same as before */ 
+              @objc func showTabSwitcher() { /* same as previous working version */ 
                   let alert = UIAlertController(title: "Tabs", message: nil, preferredStyle: .actionSheet)
                   for (i, tab) in TabManager.shared.currentTabs.enumerated() {
                       alert.addAction(UIAlertAction(title: "\(i+1). \(tab.title)", style: .default) { _ in TabManager.shared.currentIndex = i; self.loadCurrentTab() })
@@ -509,7 +401,7 @@ jobs:
                   present(alert, animated: true)
               }
               
-              @objc func showMenu() { /* same as before */
+              @objc func showMenu() { /* same as before – shortened for brevity */
                   let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
                   let uaMenu = UIAlertController(title: "User Agent", message: nil, preferredStyle: .actionSheet)
                   for mode in UserAgentManager.UAMode.allCases {
@@ -565,7 +457,6 @@ jobs:
               func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = DownloadManager.shared }
               func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = DownloadManager.shared }
               func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }; return nil }
-              
               func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) { let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert); alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() }); present(alert, animated: true) }
               func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert); alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) }); alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) }); present(alert, animated: true) }
               func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) { let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert); alert.addTextField { $0.text = defaultText }; alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(alert.textFields?.first?.text) }); alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) }); present(alert, animated: true) }
@@ -634,5 +525,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Modernize-Aero-Final
+          name: Modernize-Aero-Swipe-Enhanced
           path: Modernize.ipa
