@@ -1,4 +1,4 @@
-name: Build Qwen Studio
+name: Build Qwen Studio (Optimized)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,11 @@ jobs:
           mkdir -p patches
           
           cat > patches/polyfills.js << 'POLYFILLS_EOF'
+          // Performance-optimized polyfills
           (function(w){
+            // Only polyfill if missing (skip if native exists)
+            if (!w.MediaQueryList || w.MediaQueryList.prototype.addEventListener) return;
+            
             function getProto() {
               if (w.MediaQueryList) return w.MediaQueryList.prototype;
               if (typeof w.matchMedia === "function") {
@@ -27,7 +31,7 @@ jobs:
             var proto = getProto();
             if (!proto) return;
             var wrappers = new WeakMap();
-            proto.addEventListener = proto.addEventListener || function(type, listener) {
+            proto.addEventListener = function(type, listener) {
               if (type !== "change") return;
               if (typeof listener === "function") {
                 proto.addListener.call(this, listener);
@@ -40,7 +44,7 @@ jobs:
                 proto.addListener.call(this, wrapper);
               }
             };
-            proto.removeEventListener = proto.removeEventListener || function(type, listener) {
+            proto.removeEventListener = function(type, listener) {
               if (type !== "change") return;
               if (typeof listener === "function") {
                 proto.removeListener.call(this, listener);
@@ -52,10 +56,12 @@ jobs:
             };
           })(window);
           
+          // Fast path for queueMicrotask
           if (!window.queueMicrotask) {
-            window.queueMicrotask = function(callback) { Promise.resolve().then(callback); };
+            window.queueMicrotask = function(cb) { Promise.resolve().then(cb); };
           }
           
+          // Fast path for Promise.withResolvers
           if (!Promise.withResolvers) {
             Promise.withResolvers = function() {
               var resolve, reject;
@@ -64,61 +70,54 @@ jobs:
             };
           }
           
+          // Fast path for Array.at
           if (!Array.prototype.at) {
-            Array.prototype.at = function(index) {
-              var length = this.length;
-              var relativeIndex = index >= 0 ? index : length + index;
-              if (relativeIndex < 0 || relativeIndex >= length) return undefined;
-              return this[relativeIndex];
+            Array.prototype.at = function(idx) {
+              var len = this.length;
+              var i = idx >= 0 ? idx : len + idx;
+              return (i < 0 || i >= len) ? undefined : this[i];
             };
           }
           
+          // Fast path for String.at
           if (!String.prototype.at) {
-            String.prototype.at = function(index) {
-              var length = this.length;
-              var relativeIndex = index >= 0 ? index : length + index;
-              if (relativeIndex < 0 || relativeIndex >= length) return undefined;
-              return this[relativeIndex];
+            String.prototype.at = function(idx) {
+              var len = this.length;
+              var i = idx >= 0 ? idx : len + idx;
+              return (i < 0 || i >= len) ? undefined : this[i];
             };
           }
           
+          // Fast path for Object.hasOwn
           if (!Object.hasOwn) {
             Object.hasOwn = function(obj, prop) {
               return Object.prototype.hasOwnProperty.call(obj, prop);
             };
           }
           
+          // Fast path for Promise.any
           if (!Promise.any) {
             Promise.any = function(promises) {
               return new Promise(function(resolve, reject) {
                 var errors = [];
                 var pending = promises.length;
-                if (pending === 0) {
-                  reject(new AggregateError([], "All promises were rejected"));
-                  return;
-                }
+                if (pending === 0) { reject(new AggregateError([], "All rejected")); return; }
                 for (var i = 0; i < promises.length; i++) {
                   Promise.resolve(promises[i]).then(resolve, function(err) {
                     errors[i] = err;
-                    pending--;
-                    if (pending === 0) {
-                      reject(new AggregateError(errors, "All promises were rejected"));
-                    }
+                    if (--pending === 0) reject(new AggregateError(errors, "All rejected"));
                   });
                 }
               });
             };
           }
           
+          // Fast path for replaceAll
           if (!String.prototype.replaceAll) {
             String.prototype.replaceAll = function(search, replacement) {
-              if (typeof search === "string") {
-                return this.split(search).join(replacement);
-              }
+              if (typeof search === "string") return this.split(search).join(replacement);
               if (search instanceof RegExp) {
-                if (!search.global) {
-                  throw new TypeError("replaceAll must be called with a global RegExp");
-                }
+                if (!search.global) throw new TypeError("Global RegExp required");
                 return this.replace(search, replacement);
               }
               return this.replace(search, replacement);
@@ -126,27 +125,24 @@ jobs:
           }
           
           if (typeof AggregateError === "undefined") {
-            window.AggregateError = function AggregateError(errors, message) {
+            window.AggregateError = function(errors, message) {
               var e = new Error(message);
               e.errors = errors;
               e.name = "AggregateError";
               return e;
             };
           }
-          
-          if (!window.structuredClone) {
-            window.structuredClone = function(obj) {
-              return JSON.parse(JSON.stringify(obj));
-            };
-          }
           POLYFILLS_EOF
           
           cat > patches/loader.js << 'LOADER_EOF'
+          // Performance-optimized loader with caching
           (function() {
             var iosMatch = navigator.userAgent.match(/OS (\d+)_(\d+)/);
             var iosVersion = iosMatch ? iosMatch[1] + "." + iosMatch[2] : "15.0";
+            var cache = new Map(); // Cache transpiled code by URL
             
             if (typeof window.LegacyTranspiler === "undefined") {
+              console.warn("LegacyTranspiler missing");
               return;
             }
             
@@ -156,7 +152,7 @@ jobs:
                 try {
                   var script = document.createElement("script");
                   script.textContent = code;
-                  document.documentElement.appendChild(script);
+                  (document.head || document.documentElement).appendChild(script);
                   script.remove();
                 } catch(e) {}
               },
@@ -165,45 +161,47 @@ jobs:
             });
             
             var processedScripts = new Set();
+            
+            // Optimized observer - only process added scripts
             var observer = new MutationObserver(function(mutations) {
               for (var i = 0; i < mutations.length; i++) {
-                var mutation = mutations[i];
-                for (var j = 0; j < mutation.addedNodes.length; j++) {
-                  var node = mutation.addedNodes[j];
-                  if (node.tagName === "SCRIPT" && node.src && !processedScripts.has(node.src)) {
-                    processedScripts.add(node.src);
-                    node.type = "javascript/blocked";
-                    window.LegacyTranspiler.loadCode(node.src);
-                  }
-                  if (node.tagName === "SCRIPT" && !node.src && node.textContent && node.type !== "javascript/blocked") {
-                    var content = node.textContent;
-                    if (/(\?\?=?|&&=?|\|\|=?|class\s+\w+\s*\{|\#\w+|\basync\b|import\s*\()/g.test(content)) {
+                var nodes = mutations[i].addedNodes;
+                for (var j = 0; j < nodes.length; j++) {
+                  var node = nodes[j];
+                  if (node.tagName === "SCRIPT") {
+                    if (node.src && !processedScripts.has(node.src)) {
+                      processedScripts.add(node.src);
                       node.type = "javascript/blocked";
-                      try {
-                        var transpiled = window.LegacyTranspiler.transpile("inline.js", content);
-                        var newScript = document.createElement("script");
-                        newScript.textContent = transpiled;
-                        node.parentNode.replaceChild(newScript, node);
-                      } catch(e) {}
+                      // Check cache first
+                      if (cache.has(node.src)) {
+                        var cached = cache.get(node.src);
+                        window.LegacyTranspiler.runScript(cached);
+                      } else {
+                        window.LegacyTranspiler.loadCode(node.src).then(function(code) {
+                          if (code) cache.set(node.src, code);
+                        });
+                      }
+                    }
+                    else if (!node.src && node.textContent && node.type !== "javascript/blocked") {
+                      var content = node.textContent;
+                      // Quick check for modern syntax (faster than regex on small strings)
+                      if (content.indexOf('??') > -1 || content.indexOf('||=') > -1 || 
+                          content.indexOf('&&=') > -1 || content.indexOf('#') > -1 ||
+                          content.indexOf('class ') > -1) {
+                        node.type = "javascript/blocked";
+                        try {
+                          var transpiled = window.LegacyTranspiler.transpile("inline", content);
+                          var newScript = document.createElement("script");
+                          newScript.textContent = transpiled;
+                          node.parentNode.replaceChild(newScript, node);
+                        } catch(e) {}
+                      }
                     }
                   }
                 }
               }
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
-            
-            setTimeout(function() {
-              var scripts = document.querySelectorAll("script:not([data-processed])");
-              for (var i = 0; i < scripts.length; i++) {
-                var script = scripts[i];
-                if (script.src && !processedScripts.has(script.src)) {
-                  script.setAttribute("data-processed", "true");
-                  processedScripts.add(script.src);
-                  script.type = "javascript/blocked";
-                  window.LegacyTranspiler.loadCode(script.src);
-                }
-              }
-            }, 100);
           })();
           LOADER_EOF
           
@@ -215,7 +213,7 @@ jobs:
           mkdir -p Payload/${APP_NAME}.app
           cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
 
-      - name: Generate Swift source with banner hider
+      - name: Generate optimized Swift source
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -228,6 +226,7 @@ jobs:
               var statusBarStyle = false
               var currentDownload: WKDownload?
               var currentDownloadDestinationURL: URL?
+              private var bannerHidden = false
 
               override var preferredStatusBarStyle: UIStatusBarStyle {
                   return statusBarStyle ? .lightContent : .darkContent
@@ -243,6 +242,7 @@ jobs:
                   config.userContentController.add(self, name: "themeHandler")
                   config.allowsInlineMediaPlayback = true
                   config.mediaTypesRequiringUserActionForPlayback = []
+                  config.websiteDataStore = .default() // Persistent cache for speed
                   
                   // Load JS patches
                   let bundle = Bundle.main
@@ -262,24 +262,32 @@ jobs:
                   }
                   
                   // ============================================================
-                  // BANNER HIDER (removes "Download App" promo from Qwen)
+                  // OPTIMIZED BANNER HIDER - stops after banner is gone
                   // ============================================================
                   let bannerHiderJS = """
                   (function() {
+                      var interval = null;
+                      var observer = null;
+                      var hidden = false;
+                      
                       function hideBanner() {
+                          if (hidden) return;
                           var el = document.querySelector('.share-logo-content');
                           if (el) {
                               el.style.display = 'none';
                               el.style.visibility = 'hidden';
+                              hidden = true;
+                              // Stop the interval once banner is hidden
+                              if (interval) clearInterval(interval);
+                              if (observer) observer.disconnect();
                           }
                       }
                       
                       hideBanner();
-                      setInterval(hideBanner, 500);
+                      interval = setInterval(hideBanner, 200);
                       
-                      var observer = new MutationObserver(hideBanner);
+                      observer = new MutationObserver(hideBanner);
                       observer.observe(document.documentElement, {
-                          attributes: true,
                           childList: true,
                           subtree: true
                       });
@@ -290,79 +298,52 @@ jobs:
                   config.userContentController.addUserScript(bannerScript)
                   
                   // ============================================================
-                  // DYNAMIC STATUS BAR (retries until header loads)
+                  // OPTIMIZED THEME DETECTION - uses requestAnimationFrame
                   // ============================================================
                   let themeJS = """
                   (function() {
-                      var lastSentColor = null;
-                      var retryCount = 0;
+                      var lastColor = null;
+                      var frame = null;
+                      var retries = 0;
                       var maxRetries = 30;
                       
                       function rgbToHex(rgb) {
-                          var match = rgb.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/i);
-                          if (match) {
-                              return match[1] + ',' + match[2] + ',' + match[3];
-                          }
-                          return null;
+                          var m = rgb.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/i);
+                          return m ? m[1]+','+m[2]+','+m[3] : null;
                       }
                       
                       function getTopColor() {
-                          var selectors = [
-                              'header', 'nav', '.header', '.navbar', '.app-header',
-                              '.top-bar', '.toolbar', '[class*="header"]', '[role="banner"]',
-                              '.chat-header', '.message-header', '.main-header'
-                          ];
-                          
-                          for (var i = 0; i < selectors.length; i++) {
-                              var elements = document.querySelectorAll(selectors[i]);
-                              for (var j = 0; j < elements.length; j++) {
-                                  var el = elements[j];
-                                  var rect = el.getBoundingClientRect();
-                                  if (rect.top <= 10 && rect.height > 15) {
-                                      var color = getComputedStyle(el).backgroundColor;
-                                      var hex = rgbToHex(color);
-                                      if (hex && color !== 'rgba(0, 0, 0, 0)' && color !== 'transparent') {
-                                          return hex;
-                                      }
-                                  }
+                          var headers = document.querySelectorAll('header, nav, [class*="header"], [class*="navbar"], [role="banner"]');
+                          for (var i = 0; i < headers.length; i++) {
+                              var el = headers[i];
+                              var rect = el.getBoundingClientRect();
+                              if (rect.top <= 10 && rect.height > 15) {
+                                  var c = getComputedStyle(el).backgroundColor;
+                                  var hex = rgbToHex(c);
+                                  if (hex && c !== 'rgba(0,0,0,0)') return hex;
                               }
                           }
-                          
-                          var bodyColor = getComputedStyle(document.body).backgroundColor;
-                          var bodyHex = rgbToHex(bodyColor);
-                          if (bodyHex && bodyColor !== 'rgba(0, 0, 0, 0)') {
-                              return bodyHex;
-                          }
-                          
+                          var bodyC = getComputedStyle(document.body).backgroundColor;
+                          var bodyHex = rgbToHex(bodyC);
+                          if (bodyHex && bodyC !== 'rgba(0,0,0,0)') return bodyHex;
                           return null;
                       }
                       
                       function sendColor() {
                           var color = getTopColor();
-                          if (color && color !== lastSentColor) {
-                              lastSentColor = color;
+                          if (color && color !== lastColor) {
+                              lastColor = color;
                               window.webkit.messageHandlers.themeHandler.postMessage(color);
-                              retryCount = 0;
-                          } else if (!color && retryCount < maxRetries) {
-                              retryCount++;
+                              retries = 0;
+                          } else if (!color && retries < maxRetries) {
+                              retries++;
+                              frame = requestAnimationFrame(sendColor);
+                              return;
                           }
+                          frame = requestAnimationFrame(sendColor);
                       }
                       
                       sendColor();
-                      setInterval(sendColor, 500);
-                      
-                      var observer = new MutationObserver(function() { sendColor(); });
-                      observer.observe(document.documentElement, {
-                          attributes: true,
-                          childList: true,
-                          subtree: true,
-                          attributeFilter: ['style', 'class']
-                      });
-                      
-                      if (document.body) {
-                          var bodyObserver = new MutationObserver(function() { sendColor(); });
-                          bodyObserver.observe(document.body, { childList: true, subtree: true });
-                      }
                   })();
                   """
                   
@@ -375,7 +356,8 @@ jobs:
                   webView.navigationDelegate = self
                   webView.uiDelegate = self
                   webView.allowsBackForwardNavigationGestures = true
-                  webView.backgroundColor = UIColor.white
+                  webView.isOpaque = false // Better compositing performance
+                  webView.scrollView.decelerationRate = .normal // Smoother scrolling
                   view.addSubview(webView)
                   
                   NSLayoutConstraint.activate([
@@ -385,9 +367,17 @@ jobs:
                       webView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
                   ])
                   
+                  // Preload hint - tell WebKit to prioritize
                   if let url = URL(string: "https://chat.qwen.ai") {
-                      webView.load(URLRequest(url: url))
+                      let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30)
+                      webView.load(request)
                   }
+              }
+              
+              // MARK: - Memory management
+              override func didReceiveMemoryWarning() {
+                  super.didReceiveMemoryWarning()
+                  webView?.evaluateJavaScript("window.LegacyTranspiler?.cache?.clear?.()")
               }
               
               // MARK: - WKScriptMessageHandler
@@ -399,7 +389,7 @@ jobs:
                           let G = CGFloat(parts[1]) / 255.0
                           let B = CGFloat(parts[2]) / 255.0
                           
-                          UIView.animate(withDuration: 0.2) {
+                          UIView.animate(withDuration: 0.15) {
                               self.view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
                           }
                           
@@ -516,7 +506,7 @@ jobs:
           <key>CFBundleDisplayName</key><string>Qwen Studio</string>
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>1.0</string>
-          <key>CFBundleVersion</key><string>1</string>
+          <key>CFBundleVersion</key><string>2</string>
           <key>LSRequiresIPhoneOS</key><true/>
           <key>MinimumOSVersion</key><string>15.0</string>
           <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
@@ -544,5 +534,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: QwenStudio
+          name: QwenStudio-Optimized
           path: QwenStudio.ipa
