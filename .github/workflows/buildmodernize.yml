@@ -248,15 +248,15 @@ jobs:
               var localURL: String?
           }
           
-          // MARK: - Top Level Message Handler (FIXED - prevents crash)
+          // MARK: - Top Level Message Handler
           class ThemeMessageHandler: NSObject, WKScriptMessageHandler {
-              weak var webView: WKWebView?
-              var onColorChange: ((String) -> Void)?
+              weak var tabId: UUID?
+              var onColorChange: ((String, UUID) -> Void)?
               
               func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-                  if let rgb = message.body as? String {
+                  if let rgb = message.body as? String, let tabId = tabId {
                       DispatchQueue.main.async {
-                          self.onColorChange?(rgb)
+                          self.onColorChange?(rgb, tabId)
                       }
                   }
               }
@@ -273,26 +273,56 @@ jobs:
               var messageHandler: ThemeMessageHandler?
           }
           
-          // MARK: - Download Manager
+          // MARK: - Download Manager with Modernize Folder
           class DownloadManager: NSObject, WKDownloadDelegate {
               static let shared = DownloadManager()
-              private override init() { super.init() }
+              private override init() { super.init(); createModernizeFolder() }
               
               var currentDownload: WKDownload?
               var currentDestinationURL: URL?
               var downloads: [DownloadTask] = []
               
-              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+              private func createModernizeFolder() {
                   let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                  let destinationURL = docsURL.appendingPathComponent(suggestedFilename)
+                  let modernizeFolder = docsURL.appendingPathComponent("Modernize")
+                  if !FileManager.default.fileExists(atPath: modernizeFolder.path) {
+                      try? FileManager.default.createDirectory(at: modernizeFolder, withIntermediateDirectories: true)
+                  }
+              }
+              
+              private func getDownloadsFolder() -> URL {
+                  let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                  return docsURL.appendingPathComponent("Modernize")
+              }
+              
+              // Required delegate method (iOS 14.5+)
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor (URL?) -> Void) {
+                  let folder = getDownloadsFolder()
+                  let destinationURL = folder.appendingPathComponent(suggestedFilename)
                   currentDestinationURL = destinationURL
                   completionHandler(destinationURL)
               }
               
+              // Required delegate method (iOS 15+ async version)
+              @available(iOS 15.0, *)
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
+                  let folder = getDownloadsFolder()
+                  let destinationURL = folder.appendingPathComponent(suggestedFilename)
+                  currentDestinationURL = destinationURL
+                  return destinationURL
+              }
+              
               func downloadDidFinish(_ download: WKDownload) {
                   if let url = currentDestinationURL {
-                      let task = DownloadTask(id: UUID(), filename: url.lastPathComponent, url: url.absoluteString, isComplete: true, localURL: url.absoluteString)
+                      let task = DownloadTask(
+                          id: UUID(),
+                          filename: url.lastPathComponent,
+                          url: url.absoluteString,
+                          isComplete: true,
+                          localURL: url.absoluteString
+                      )
                       downloads.append(task)
+                      saveDownloads()
                   }
                   currentDownload = nil
                   currentDestinationURL = nil
@@ -301,6 +331,19 @@ jobs:
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
                   currentDownload = nil
                   currentDestinationURL = nil
+              }
+              
+              private func saveDownloads() {
+                  if let data = try? JSONEncoder().encode(downloads) {
+                      UserDefaults.standard.set(data, forKey: "saved_downloads")
+                  }
+              }
+              
+              func loadDownloads() {
+                  if let data = UserDefaults.standard.data(forKey: "saved_downloads"),
+                     let saved = try? JSONDecoder().decode([DownloadTask].self, from: data) {
+                      downloads = saved
+                  }
               }
           }
           
@@ -355,9 +398,9 @@ jobs:
                   
                   // FIXED: Create and retain message handler properly
                   let handler = ThemeMessageHandler()
-                  handler.onColorChange = { [weak self, weak tab] rgb in
-                      guard let tab = tab else { return }
-                      NotificationCenter.default.post(name: NSNotification.Name("ThemeColorChanged"), object: ["rgb": rgb, "tabId": tab.id.uuidString])
+                  handler.tabId = tab.id
+                  handler.onColorChange = { rgb, tabId in
+                      NotificationCenter.default.post(name: NSNotification.Name("ThemeColorChanged"), object: ["rgb": rgb, "tabId": tabId.uuidString])
                   }
                   config.userContentController.add(handler, name: "themeHandler")
                   tab.messageHandler = handler
@@ -381,9 +424,10 @@ jobs:
               }
               
               func closeTab(at index: Int) {
+                  guard index < currentTabs.count else { return }
                   let tab = currentTabs[index]
                   tab.webView.stopLoading()
-                  if let handler = tab.messageHandler {
+                  if tab.messageHandler != nil {
                       tab.webView.configuration.userContentController.removeScriptMessageHandler(forName: "themeHandler")
                   }
                   if privateMode {
@@ -543,7 +587,7 @@ jobs:
           }
           
           // MARK: - Main Browser ViewController
-          class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate, WKDownloadDelegate {
+          class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
               
               var bottomToolbar: UIView!
               var urlTextField: UITextField!
@@ -563,6 +607,7 @@ jobs:
               override func viewDidLoad() {
                   super.viewDidLoad()
                   view.backgroundColor = UIColor.systemBackground
+                  DownloadManager.shared.loadDownloads()
                   
                   setupUI()
                   setupKeyboardHandling()
@@ -930,9 +975,9 @@ jobs:
               }
               
               func showDownloads() {
-                  let alert = UIAlertController(title: "Downloads", message: nil, preferredStyle: .actionSheet)
+                  let alert = UIAlertController(title: "Downloads", message: "Saved in Modernize folder", preferredStyle: .actionSheet)
                   for download in DownloadManager.shared.downloads.reversed() {
-                      alert.addAction(UIAlertAction(title: download.filename, style: .default) { _ in
+                      alert.addAction(UIAlertAction(title: "📁 " + download.filename, style: .default) { _ in
                           if let url = URL(string: download.localURL ?? "") {
                               let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
                               self.present(activity, animated: true)
@@ -1035,7 +1080,7 @@ jobs:
               }
           }
           
-          // MARK: - App Delegate with URL Scheme support for Default Browser
+          // MARK: - App Delegate
           class AppDelegate: UIResponder, UIApplicationDelegate {
               var window: UIWindow?
               
@@ -1046,7 +1091,6 @@ jobs:
                   return true
               }
               
-              // Handle URL scheme for default browser
               func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
                   if let rootVC = window?.rootViewController as? BrowserViewController {
                       rootVC.loadURL(url)
@@ -1065,7 +1109,7 @@ jobs:
           xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -o Payload/${APP_NAME}.app/${APP_NAME} app.swift
           chmod +x Payload/${APP_NAME}.app/${APP_NAME}
 
-      - name: Create Info.plist with default browser support
+      - name: Create Info.plist
         run: |
           APP_NAME="Modernize"
           cat > Payload/${APP_NAME}.app/Info.plist << 'PLIST'
@@ -1090,8 +1134,8 @@ jobs:
           <key>NSLocationWhenInUseUsageDescription</key><string>Modernize needs location for web services</string>
           <key>NSPhotoLibraryUsageDescription</key><string>Modernize needs photo library for uploads</string>
           <key>UISupportsDocumentBrowser</key><true/>
-          
-          <!-- Default Browser Support -->
+          <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+          <key>UIFileSharingEnabled</key><true/>
           <key>CFBundleURLTypes</key>
           <array>
               <dict>
@@ -1105,8 +1149,6 @@ jobs:
                   </array>
               </dict>
           </array>
-          
-          <!-- Icon Support -->
           <key>CFBundleIcons</key>
           <dict>
               <key>CFBundlePrimaryIcon</key>
