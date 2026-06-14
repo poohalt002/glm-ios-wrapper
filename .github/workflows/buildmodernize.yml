@@ -1,4 +1,4 @@
-name: Build Modernize Browser (Separate JS files)
+name: Build Modernize Browser (Auto-Download + Fix Loading)
 
 on:
   workflow_dispatch:
@@ -11,11 +11,58 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create base polyfills and loader (small files)
+      - name: Create patches folder
+        run: mkdir -p patches
+
+      - name: Download core-js (full ES2020-2025 - 600KB)
         run: |
-          mkdir -p patches
-          
+          curl -L -o patches/core-js.js https://cdn.jsdelivr.net/npm/core-js@3/actual/minified.js
+          echo "core-js downloaded: $(wc -c < patches/core-js.js) bytes"
+
+      - name: Download web-animations-js (Web Animations API - 420KB)
+        run: |
+          curl -L -o patches/web-animations.js https://cdn.jsdelivr.net/npm/web-animations-js@2.3.2/web-animations.min.js
+          echo "web-animations downloaded: $(wc -c < patches/web-animations.js) bytes"
+
+      - name: Download whatwg-fetch
+        run: |
+          curl -L -o patches/fetch.js https://cdn.jsdelivr.net/npm/whatwg-fetch@3.6.20/dist/fetch.umd.js
+          echo "fetch downloaded: $(wc -c < patches/fetch.js) bytes"
+
+      - name: Download abortcontroller-polyfill
+        run: |
+          curl -L -o patches/abortcontroller.js https://cdn.jsdelivr.net/npm/abortcontroller-polyfill@1.7.5/dist/abortcontroller-polyfill-only.js
+          echo "abortcontroller downloaded: $(wc -c < patches/abortcontroller.js) bytes"
+
+      - name: Download urlpattern-polyfill
+        run: |
+          curl -L -o patches/urlpattern.js https://cdn.jsdelivr.net/npm/urlpattern-polyfill@10.0.0/index.js
+          echo "urlpattern downloaded: $(wc -c < patches/urlpattern.js) bytes"
+
+      - name: Download intersection-observer
+        run: |
+          curl -L -o patches/intersection-observer.js https://cdn.jsdelivr.net/npm/intersection-observer@0.12.2/intersection-observer.js
+          echo "intersection-observer downloaded: $(wc -c < patches/intersection-observer.js) bytes"
+
+      - name: Download resize-observer-polyfill
+        run: |
+          curl -L -o patches/resize-observer.js https://cdn.jsdelivr.net/npm/resize-observer-polyfill@1.5.1/dist/ResizeObserver.js
+          echo "resize-observer downloaded: $(wc -c < patches/resize-observer.js) bytes"
+
+      - name: Download web-streams-polyfill
+        run: |
+          curl -L -o patches/streams.js https://cdn.jsdelivr.net/npm/web-streams-polyfill@4.0.0/dist/polyfill.js
+          echo "streams downloaded: $(wc -c < patches/streams.js) bytes"
+
+      - name: Download structured-clone-polyfill
+        run: |
+          curl -L -o patches/structured-clone.js https://cdn.jsdelivr.net/npm/structured-clone-polyfill@1.0.1/src/structuredClone.js
+          echo "structured-clone downloaded: $(wc -c < patches/structured-clone.js) bytes"
+
+      - name: Create loader and polyfills base
+        run: |
           cat > patches/polyfills.js << 'POLYFILLS_EOF'
+          // Basic polyfills for iOS 15
           (function(global){
             if (!global.queueMicrotask) global.queueMicrotask = function(cb){ Promise.resolve().then(cb); };
             if (!Array.prototype.at) Array.prototype.at = function(idx){ var len=this.length,i=idx>=0?idx:len+idx; return (i<0||i>=len)?undefined:this[i]; };
@@ -26,14 +73,17 @@ jobs:
           POLYFILLS_EOF
           
           cat > patches/loader.js << 'LOADER_EOF'
+          // Main loader that initializes the transpiler
           (function(){
             var iosMatch = navigator.userAgent.match(/OS (\d+)_(\d+)/);
             var iosVersion = iosMatch ? iosMatch[1] + "." + iosMatch[2] : "15.0";
             var cache = new Map();
+            
             if (typeof window.LegacyTranspiler === "undefined") {
-              console.warn("LegacyTranspiler not loaded");
+              console.warn("LegacyTranspiler not loaded – some modern JS may fail");
               return;
             }
+            
             window.LegacyTranspiler.init({
               BASE_URL: window.location.origin,
               runScript: function(code) {
@@ -47,6 +97,7 @@ jobs:
               target: { platform: "iOS", version: iosVersion },
               minify: true
             });
+            
             var processedScripts = new Set();
             var observer = new MutationObserver(function(mutations) {
               for (var i = 0; i < mutations.length; i++) {
@@ -84,6 +135,7 @@ jobs:
               }
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
+            
             setTimeout(function() {
               var scripts = document.querySelectorAll("script:not([data-processed])");
               for (var i = 0; i < scripts.length; i++) {
@@ -98,23 +150,137 @@ jobs:
             }, 100);
           })();
           LOADER_EOF
+
+      - name: Combine all polyfills into legacy-transpiler-enhanced.js
+        run: |
+          # Create the enhanced polyfill file with all downloaded libraries
+          echo "// === ULTIMATE POLYFILL BUNDLE === //" > patches/legacy-transpiler-enhanced.js
+          echo "// core-js (ES2020-2025)" >> patches/legacy-transpiler-enhanced.js
+          cat patches/core-js.js >> patches/legacy-transpiler-enhanced.js
+          echo "// web-animations-js" >> patches/legacy-transpiler-enhanced.js
+          cat patches/web-animations.js >> patches/legacy-transpiler-enhanced.js
+          echo "// whatwg-fetch" >> patches/legacy-transpiler-enhanced.js
+          cat patches/fetch.js >> patches/legacy-transpiler-enhanced.js
+          echo "// abortcontroller-polyfill" >> patches/legacy-transpiler-enhanced.js
+          cat patches/abortcontroller.js >> patches/legacy-transpiler-enhanced.js
+          echo "// urlpattern-polyfill" >> patches/legacy-transpiler-enhanced.js
+          cat patches/urlpattern.js >> patches/legacy-transpiler-enhanced.js
+          echo "// intersection-observer" >> patches/legacy-transpiler-enhanced.js
+          cat patches/intersection-observer.js >> patches/legacy-transpiler-enhanced.js
+          echo "// resize-observer-polyfill" >> patches/legacy-transpiler-enhanced.js
+          cat patches/resize-observer.js >> patches/legacy-transpiler-enhanced.js
+          echo "// web-streams-polyfill" >> patches/legacy-transpiler-enhanced.js
+          cat patches/streams.js >> patches/legacy-transpiler-enhanced.js
+          echo "// structured-clone-polyfill" >> patches/legacy-transpiler-enhanced.js
+          cat patches/structured-clone.js >> patches/legacy-transpiler-enhanced.js
           
-          echo "Base patches created"
+          # Add iOS 15 specific fallbacks
+          cat >> patches/legacy-transpiler-enhanced.js << 'FALLBACKS_EOF'
+          
+          // === iOS 15 SPECIFIC FALLBACKS ===
+          (function(global) {
+              // MediaQueryList event listener
+              if (global.MediaQueryList && !global.MediaQueryList.prototype.addEventListener) {
+                  var proto = global.MediaQueryList.prototype;
+                  var wrappers = new WeakMap();
+                  proto.addEventListener = function(type, listener) {
+                      if (type !== 'change') return;
+                      if (typeof listener === 'function') {
+                          proto.addListener.call(this, listener);
+                      } else {
+                          var wrapper = wrappers.get(listener);
+                          if (!wrapper) {
+                              wrapper = function(ev) { listener.handleEvent(ev); };
+                              wrappers.set(listener, wrapper);
+                          }
+                          proto.addListener.call(this, wrapper);
+                      }
+                  };
+                  proto.removeEventListener = function(type, listener) {
+                      if (type !== 'change') return;
+                      if (typeof listener === 'function') {
+                          proto.removeListener.call(this, listener);
+                      } else {
+                          var wrapper = wrappers.get(listener);
+                          if (wrapper) proto.removeListener.call(this, wrapper);
+                      }
+                  };
+              }
+          
+              // CSS.supports
+              if (!global.CSS) global.CSS = {};
+              if (typeof CSS.supports !== 'function') {
+                  CSS.supports = function(prop, value) {
+                      var el = document.createElement('div');
+                      if (arguments.length === 1) {
+                          var pair = prop.split(':');
+                          return typeof el.style[pair[0].trim()] !== 'undefined';
+                      }
+                      return typeof el.style[prop] !== 'undefined';
+                  };
+              }
+          
+              // requestIdleCallback
+              if (typeof requestIdleCallback !== 'function') {
+                  global.requestIdleCallback = function(cb) {
+                      return setTimeout(function() {
+                          cb({ didTimeout: false, timeRemaining: function() { return 50; } });
+                      }, 1);
+                  };
+                  global.cancelIdleCallback = function(id) { clearTimeout(id); };
+              }
+          
+              // reportError
+              if (typeof reportError !== 'function') {
+                  global.reportError = function(err) {
+                      setTimeout(function() { throw err; }, 0);
+                  };
+              }
+          
+              // navigator.credentials
+              if (!global.navigator.credentials) {
+                  global.navigator.credentials = { get: function() { return Promise.resolve(null); } };
+              }
+          
+              // Atomics.waitAsync
+              if (global.Atomics && !global.Atomics.waitAsync) {
+                  global.Atomics.waitAsync = function() { return Promise.reject(new Error('Not supported')); };
+              }
+          
+              console.log('[Ultimate Polyfill] iOS 15 now supports ES2020-2025 + modern Web APIs. Size: ~' + (performance && performance.memory ? 'unknown' : 'large') + ' bytes');
+          })(window);
+          FALLBACKS_EOF
+          
+          echo "Final polyfill created. Size: $(wc -c < patches/legacy-transpiler-enhanced.js) bytes"
+          ls -lh patches/
+
+      - name: Verify legacy-transpiler.js exists (first file)
+        run: |
+          if [ ! -f patches/legacy-transpiler.js ]; then
+            echo "ERROR: patches/legacy-transpiler.js not found!"
+            echo "You must upload your 274KB legacy-transpiler.js to the patches/ folder"
+            exit 1
+          fi
+          echo "legacy-transpiler.js found. Size: $(wc -c < patches/legacy-transpiler.js) bytes"
 
       - name: Create app bundle and copy all JS files
         run: |
           APP_NAME="Modernize"
           mkdir -p Payload/${APP_NAME}.app
+          
           # Copy EVERY .js file from patches/ into the app bundle
-          cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
+          cp patches/*.js Payload/${APP_NAME}.app/
+          
+          # Verify all files were copied
+          echo "=== JS files in app bundle ==="
+          ls -la Payload/${APP_NAME}.app/*.js
+          
           # Copy icons if present
           for icon in Icon-60@2x.png Icon-60@3x.png Icon-76.png Icon-76@2x.png; do
             if [ -f "$icon" ]; then cp "$icon" Payload/${APP_NAME}.app/; fi
           done
-          echo "Copied JS files:"
-          ls -la Payload/${APP_NAME}.app/*.js
 
-      - name: Generate Swift source (smooth animations, swipe, aero)
+      - name: Generate Swift source (with swipe gestures)
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -125,7 +291,7 @@ jobs:
           struct HistoryEntry: Codable { var id = UUID(); var title: String; var url: String; var date: Date }
           struct TabState: Codable { var id = UUID(); var title: String; var url: String; var isPrivate: Bool }
           
-          // MARK: - UserAgentManager (fixed)
+          // MARK: - UserAgentManager
           class UserAgentManager {
               static let shared = UserAgentManager()
               private let defaults = UserDefaults.standard
@@ -215,16 +381,16 @@ jobs:
               func clearAll() { if privateMode { privateTabs.removeAll(); addTab(isPrivate: true) } else { tabs.removeAll(); addTab() }; currentIndex = 0 }
           }
           
-          // MARK: - Main BrowserViewController with smooth animations
+          // MARK: - Main BrowserViewController
           class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
+              
               var webView: WKWebView!
               var urlTextField: UITextField!
               var backButton, forwardButton, reloadButton, tabsButton, menuButton: UIButton!
               var progressView: UIProgressView!
               var bottomToolbar: UIVisualEffectView!
               var bottomConstraint: NSLayoutConstraint!
-              var toolbarHidden = false
-              private var animator: UIViewPropertyAnimator?
+              private var toolbarHidden = false
               
               override func viewDidLoad() {
                   super.viewDidLoad()
@@ -244,12 +410,20 @@ jobs:
                   config.allowsInlineMediaPlayback = true
                   config.mediaTypesRequiringUserActionForPlayback = []
                   let bundle = Bundle.main
-                  // Load all JS files from bundle: polyfills, loader, and both transpilers
-                  for file in ["polyfills", "loader", "legacy-transpiler", "legacy-transpiler-enhanced"] {
-                      if let path = bundle.path(forResource: file, ofType: "js"), let js = try? String(contentsOfFile: path) {
-                          config.userContentController.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+                  
+                  // CRITICAL: Load ALL JS files in the correct order
+                  let jsFiles = ["polyfills", "core-js", "web-animations", "fetch", "abortcontroller", "urlpattern", "intersection-observer", "resize-observer", "streams", "structured-clone", "legacy-transpiler-enhanced", "legacy-transpiler", "loader"]
+                  
+                  for fileName in jsFiles {
+                      if let path = bundle.path(forResource: fileName, ofType: "js"), let js = try? String(contentsOfFile: path, encoding: .utf8) {
+                          let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                          config.userContentController.addUserScript(script)
+                          print("Loaded: \(fileName).js")
+                      } else {
+                          print("Warning: \(fileName).js not found")
                       }
                   }
+                  
                   webView = WKWebView(frame: .zero, configuration: config)
                   webView.translatesAutoresizingMaskIntoConstraints = false
                   webView.navigationDelegate = self
@@ -343,30 +517,31 @@ jobs:
               func setupSwipeGestures() {
                   let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeUp))
                   swipeUp.direction = .up
+                  swipeUp.delegate = self
                   webView.addGestureRecognizer(swipeUp)
+                  
                   let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeDown))
                   swipeDown.direction = .down
+                  swipeDown.delegate = self
                   webView.addGestureRecognizer(swipeDown)
               }
               
-              @objc func handleSwipeUp() {
+              @objc private func handleSwipeUp() {
                   guard !toolbarHidden else { return }
                   toolbarHidden = true
-                  animator = UIViewPropertyAnimator(duration: 0.3, curve: .easeInOut) {
+                  UIView.animate(withDuration: 0.3) {
                       self.bottomConstraint.constant = -self.bottomToolbar.bounds.height
                       self.view.layoutIfNeeded()
                   }
-                  animator?.startAnimation()
               }
               
-              @objc func handleSwipeDown() {
+              @objc private func handleSwipeDown() {
                   guard toolbarHidden else { return }
                   toolbarHidden = false
-                  animator = UIViewPropertyAnimator(duration: 0.3, curve: .easeInOut) {
+                  UIView.animate(withDuration: 0.3) {
                       self.bottomConstraint.constant = 0
                       self.view.layoutIfNeeded()
                   }
-                  animator?.startAnimation()
               }
               
               func setupKeyboardHandling() {
@@ -541,7 +716,6 @@ jobs:
                   }
               }
               
-              // MARK: - WKNavigationDelegate
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
                   urlTextField.text = webView.url?.absoluteString
                   backButton.isEnabled = webView.canGoBack
@@ -559,7 +733,6 @@ jobs:
               func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) { download.delegate = DownloadManager.shared }
               func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }; return nil }
               
-              // MARK: - WKUIDelegate
               func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
                   let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
                   alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
@@ -580,7 +753,12 @@ jobs:
               }
           }
           
-          // MARK: - App Delegate
+          extension BrowserViewController: UIGestureRecognizerDelegate {
+              func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+                  return true
+              }
+          }
+          
           class AppDelegate: UIResponder, UIApplicationDelegate {
               var window: UIWindow?
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
@@ -643,5 +821,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Modernize-Separate-JS-Final
+          name: Modernize-Ultimate-Polyfill-Fixed
           path: Modernize.ipa
