@@ -1,4 +1,4 @@
-name: Build Chat Z.AI for iOS 15.8
+name: Build GLM for iOS 15.8
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
           mkdir -p patches
           
           # ============================================
-          # polyfills.js
+          # polyfills.js (same as before)
           # ============================================
           cat > patches/polyfills.js << 'POLYFILLS_EOF'
           (function(w){
@@ -222,11 +222,11 @@ jobs:
 
       - name: Create app structure
         run: |
-          APP_NAME="ChatZAI"
+          APP_NAME="GLM"
           mkdir -p Payload/${APP_NAME}.app
           cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || echo "No patches to copy"
 
-      - name: Generate Swift source with error handling
+      - name: Generate Swift source with FIXED status bar + renamed app
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -236,12 +236,17 @@ jobs:
           class ViewController: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
               var webView: WKWebView!
               var statusBarStyle = false
-              var debugMode = true  // Force debug mode for troubleshooting
+              var debugMode = true
               var loadingIndicator: UIActivityIndicatorView!
               let websiteURL = "https://chat.z.ai"
 
               override var preferredStatusBarStyle: UIStatusBarStyle {
                   return statusBarStyle ? .lightContent : .darkContent
+              }
+              
+              // Ensure status bar is visible
+              override var prefersStatusBarHidden: Bool {
+                  return false
               }
 
               override func viewDidLoad() {
@@ -274,21 +279,20 @@ jobs:
                           print("✅ Loaded: \(file).js")
                       } else {
                           print("❌ Missing: \(file).js")
-                          showErrorAlert(message: "Missing patch file: \(file).js")
                       }
                   }
                   
-                  // Note: legacy-transpiler.js must be provided separately
+                  // Legacy transpiler (optional)
                   if let path = bundle.path(forResource: "legacy-transpiler", ofType: "js"),
                      let js = try? String(contentsOfFile: path, encoding: .utf8) {
                       let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
                       config.userContentController.addUserScript(script)
                       print("✅ Loaded: legacy-transpiler.js")
                   } else {
-                      print("⚠️ legacy-transpiler.js not found - modern JS may fail")
+                      print("⚠️ legacy-transpiler.js not found")
                   }
                   
-                  // Debug console overlay (injected at document end)
+                  // Debug console overlay
                   let debugJS = """
                   (function() {
                       console.log("Debug overlay initializing...");
@@ -307,7 +311,7 @@ jobs:
                   let debugScript = WKUserScript(source: debugJS, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
                   config.userContentController.addUserScript(debugScript)
                   
-                  // Theme detection
+                  // Theme detection for dynamic status bar
                   let themeJS = """
                   function getTopColor() {
                       var selectors = ['header','nav','[class*=header]','[class*=navbar]','[class*=toolbar]','[role=banner]'];
@@ -337,15 +341,15 @@ jobs:
                   
                   webView = WKWebView(frame: .zero, configuration: config)
                   webView.translatesAutoresizingMaskIntoConstraints = false
-                  // Use REAL iOS 15.8 user agent (not fake iOS 26)
                   webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
                   webView.uiDelegate = self
                   webView.navigationDelegate = self
                   if #available(iOS 16.4, *) { webView.isInspectable = true }
                   view.addSubview(webView)
                   
+                  // FIXED: Use safeAreaLayoutGuide to prevent status bar overlap
                   NSLayoutConstraint.activate([
-                      webView.topAnchor.constraint(equalTo: view.topAnchor),
+                      webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
                       webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                       webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       webView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -355,11 +359,11 @@ jobs:
                       print("Loading URL: \(websiteURL)")
                       webView.load(URLRequest(url: url))
                   } else {
-                      showErrorAlert(message: "Invalid URL: \(websiteURL)")
+                      print("Invalid URL")
                   }
               }
               
-              // MARK: - WKNavigationDelegate - Error Handling
+              // MARK: - WKNavigationDelegate
               func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
                   loadingIndicator.stopAnimating()
                   print("Page loaded successfully")
@@ -368,34 +372,19 @@ jobs:
               func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
                   loadingIndicator.stopAnimating()
                   print("Navigation failed: \(error.localizedDescription)")
-                  showErrorAlert(message: "Navigation failed: \(error.localizedDescription)")
               }
               
               func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
                   loadingIndicator.stopAnimating()
-                  print("Provisional navigation failed: \(error.localizedDescription)")
-                  showErrorAlert(message: "Failed to load website\n\n\(error.localizedDescription)\n\nURL: \(websiteURL)")
+                  print("Failed to load: \(error.localizedDescription)")
               }
               
-              func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-                  print("Started loading...")
-              }
-              
-              // Handle HTTPS redirects and server trust
               func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
                   if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
                       let cred = URLCredential(trust: challenge.protectionSpace.serverTrust!)
                       completionHandler(.useCredential, cred)
                   } else {
                       completionHandler(.performDefaultHandling, nil)
-                  }
-              }
-              
-              func showErrorAlert(message: String) {
-                  DispatchQueue.main.async {
-                      let alert = UIAlertController(title: "Error", message: message, preferredStyle: .alert)
-                      alert.addAction(UIAlertAction(title: "OK", style: .default))
-                      self.present(alert, animated: true)
                   }
               }
               
@@ -451,22 +440,22 @@ jobs:
 
       - name: Compile Swift
         run: |
-          APP_NAME="ChatZAI"
+          APP_NAME="GLM"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/${APP_NAME}.app/${APP_NAME} app.swift
           chmod +x Payload/${APP_NAME}.app/${APP_NAME}
 
       - name: Create Info.plist
         run: |
-          APP_NAME="ChatZAI"
+          APP_NAME="GLM"
           cat > Payload/${APP_NAME}.app/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>ChatZAI</string>
-          <key>CFBundleIdentifier</key><string>com.chatzai.app</string>
-          <key>CFBundleName</key><string>Chat Z.AI</string>
-          <key>CFBundleDisplayName</key><string>Chat Z.AI</string>
+          <key>CFBundleExecutable</key><string>GLM</string>
+          <key>CFBundleIdentifier</key><string>com.glm.app</string>
+          <key>CFBundleName</key><string>GLM</string>
+          <key>CFBundleDisplayName</key><string>GLM</string>
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>1.0</string>
           <key>CFBundleVersion</key><string>1</string>
@@ -475,26 +464,28 @@ jobs:
           <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
           <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
           <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+          <key>UIStatusBarHidden</key><false/>
+          <key>UIStatusBarStyle</key><string>UIStatusBarStyleDefault</string>
           <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
-          <key>NSMicrophoneUsageDescription</key><string>Chat Z.AI needs microphone for voice input</string>
-          <key>NSCameraUsageDescription</key><string>Chat Z.AI needs camera for image uploads</string>
-          <key>NSLocationWhenInUseUsageDescription</key><string>Chat Z.AI needs location for AI features</string>
-          <key>NSPhotoLibraryUsageDescription</key><string>Chat Z.AI needs photo library for image uploads</string>
+          <key>NSMicrophoneUsageDescription</key><string>GLM needs microphone for voice input</string>
+          <key>NSCameraUsageDescription</key><string>GLM needs camera for image uploads</string>
+          <key>NSLocationWhenInUseUsageDescription</key><string>GLM needs location for AI features</string>
+          <key>NSPhotoLibraryUsageDescription</key><string>GLM needs photo library for image uploads</string>
           </dict></plist>
           PLIST
 
       - name: Create PkgInfo
         run: |
-          APP_NAME="ChatZAI"
+          APP_NAME="GLM"
           printf 'APPL????' > Payload/${APP_NAME}.app/PkgInfo
 
       - name: Create IPA
         run: |
-          APP_NAME="ChatZAI"
+          APP_NAME="GLM"
           zip -r ${APP_NAME}.ipa Payload/
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ChatZAI-iOS15.8
-          path: ChatZAI.ipa
+          name: GLM-iOS15.8
+          path: GLM.ipa
