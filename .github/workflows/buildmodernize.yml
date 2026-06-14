@@ -1,4 +1,5 @@
-name: Build Modernize Browser (iOS 15 Stable)
+```yaml
+name: Build Modernize Browser (iOS 15 Stable - No Download Conflict)
 
 on:
   workflow_dispatch:
@@ -146,7 +147,7 @@ jobs:
             if [ -f "$icon" ]; then cp "$icon" Payload/${APP_NAME}.app/; fi
           done
 
-      - name: Generate final Swift source (crash‑free)
+      - name: Generate final Swift source (no download conflict)
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -201,7 +202,7 @@ jobs:
               }
           }
 
-          // MARK: - History, Bookmarks, Download Manager
+          // MARK: - History, Bookmarks
           class HistoryManager {
               static let shared = HistoryManager(); private let defaults = UserDefaults.standard; private let key = "browser_history"
               var history: [HistoryEntry] {
@@ -222,6 +223,7 @@ jobs:
               func remove(at index: Int) { var current = bookmarks; current.remove(at: index); bookmarks = current }
           }
           
+          // MARK: - Download Manager (No conflict: only async version)
           class DownloadManager: NSObject, WKDownloadDelegate {
               static let shared = DownloadManager()
               private override init() { super.init(); createFolder() }
@@ -232,16 +234,11 @@ jobs:
               }
               private func folder() -> URL { return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("Modernize") }
               
-              // REQUIRED: completion‑handler version for iOS 14–15 (prevents crash)
-              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor (URL?) -> Void) {
-                  let dest = folder().appendingPathComponent(suggestedFilename)
-                  completionHandler(dest)
-              }
-              // iOS 15+ async version
               @available(iOS 15.0, *)
               func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
                   return folder().appendingPathComponent(suggestedFilename)
               }
+              
               func downloadDidFinish(_ download: WKDownload) { }
               func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) { }
           }
@@ -535,5 +532,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Modernize-iOS15-Stable
+          name: Modernize-iOS15-Stable-Final
           path: Modernize.ipa
