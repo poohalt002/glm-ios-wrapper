@@ -1,4 +1,4 @@
-name: Build Gemini
+name: Build Gemini (with Icon & Fixed Status Bar)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create patch files
+      - name: Create polyfills and loader
         run: |
           mkdir -p patches
           
@@ -130,9 +130,7 @@ jobs:
             var iosVersion = iosMatch ? iosMatch[1] + "." + iosMatch[2] : "15.0";
             var cache = new Map();
             
-            if (typeof window.LegacyTranspiler === "undefined") {
-              return;
-            }
+            if (typeof window.LegacyTranspiler === "undefined") return;
             
             window.LegacyTranspiler.init({
               BASE_URL: window.location.origin,
@@ -190,13 +188,21 @@ jobs:
           
           echo "Patches created"
 
-      - name: Create app structure
+      - name: Create app bundle and copy resources
         run: |
           APP_NAME="Gemini"
           mkdir -p Payload/${APP_NAME}.app
           cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
+          
+          # Copy icon files from repo root if they exist
+          for icon in Icon-60@2x.png Icon-60@3x.png Icon-76.png Icon-76@2x.png Icon-40.png Icon-40@2x.png; do
+            if [ -f "$icon" ]; then
+              cp "$icon" Payload/${APP_NAME}.app/
+              echo "Copied $icon"
+            fi
+          done
 
-      - name: Generate optimized Swift source for Gemini
+      - name: Generate Swift source (with fixed status bar)
         run: |
           cat > app.swift << 'SWIFT'
           import UIKit
@@ -227,8 +233,7 @@ jobs:
                   config.websiteDataStore = .default()
                   
                   let bundle = Bundle.main
-                  let patchFiles = ["polyfills", "loader"]
-                  for file in patchFiles {
+                  for file in ["polyfills", "loader"] {
                       if let path = bundle.path(forResource: file, ofType: "js"),
                          let js = try? String(contentsOfFile: path, encoding: .utf8) {
                           let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
@@ -242,100 +247,76 @@ jobs:
                       config.userContentController.addUserScript(script)
                   }
                   
-                  // Banner hider for Gemini (removes "Get the app" prompts)
+                  // Banner hider for Gemini
                   let bannerHiderJS = """
                   (function() {
-                      var interval = null;
-                      var observer = null;
-                      var hidden = false;
-                      
-                      function hideBanners() {
-                          if (hidden) return;
-                          // Common selectors for app download banners
-                          var selectors = [
-                              '[class*="download"]', '[class*="banner"]', '[class*="app-store"]',
-                              '[class*="promo"]', '[class*="cta"]', '[aria-label*="app"]',
-                              '.google-banner', '.install-banner', '.app-banner'
-                          ];
-                          var found = false;
-                          for (var i = 0; i < selectors.length; i++) {
-                              var elements = document.querySelectorAll(selectors[i]);
-                              for (var j = 0; j < elements.length; j++) {
-                                  var el = elements[j];
-                                  var text = el.innerText || '';
-                                  if (text.match(/download|install|get.*app|open.*app|available.*app/i) || 
-                                      el.style.position === 'fixed' && el.style.bottom === '0px') {
-                                      el.style.display = 'none';
-                                      el.style.visibility = 'hidden';
-                                      found = true;
+                      var interval, observer, hidden=false;
+                      function hideBanners(){
+                          if(hidden) return;
+                          var selectors=['[class*="download"]','[class*="banner"]','[class*="app-store"]','[class*="promo"]','[class*="cta"]','.google-banner','.install-banner'];
+                          var found=false;
+                          for(var i=0;i<selectors.length;i++){
+                              var els=document.querySelectorAll(selectors[i]);
+                              for(var j=0;j<els.length;j++){
+                                  var el=els[j], txt=el.innerText||'';
+                                  if(txt.match(/download|install|get.*app|open.*app/i) || (el.style.position==='fixed' && el.style.bottom==='0px')){
+                                      el.style.display='none'; el.style.visibility='hidden';
+                                      found=true;
                                   }
                               }
                           }
-                          if (found) {
-                              hidden = true;
-                              if (interval) clearInterval(interval);
-                              if (observer) observer.disconnect();
+                          if(found){
+                              hidden=true;
+                              if(interval) clearInterval(interval);
+                              if(observer) observer.disconnect();
                           }
                       }
-                      
                       hideBanners();
-                      interval = setInterval(hideBanners, 300);
-                      observer = new MutationObserver(hideBanners);
-                      observer.observe(document.documentElement, { childList: true, subtree: true });
+                      interval=setInterval(hideBanners,300);
+                      observer=new MutationObserver(hideBanners);
+                      observer.observe(document.documentElement,{childList:true,subtree:true});
                   })();
                   """
-                  
                   let bannerScript = WKUserScript(source: bannerHiderJS, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
                   config.userContentController.addUserScript(bannerScript)
                   
                   // Dynamic status bar
                   let themeJS = """
-                  (function() {
-                      var lastColor = null;
-                      var frame = null;
-                      var retries = 0;
-                      var maxRetries = 30;
-                      
-                      function rgbToHex(rgb) {
-                          var m = rgb.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/i);
-                          return m ? m[1]+','+m[2]+','+m[3] : null;
+                  (function(){
+                      var lastColor=null, frame=null, retries=0, maxRetries=30;
+                      function rgbToHex(rgb){
+                          var m=rgb.match(/rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/i);
+                          return m?m[1]+','+m[2]+','+m[3]:null;
                       }
-                      
-                      function getTopColor() {
-                          var headers = document.querySelectorAll('header, nav, [class*="header"], [class*="navbar"], [role="banner"], .mdc-top-app-bar');
-                          for (var i = 0; i < headers.length; i++) {
-                              var el = headers[i];
-                              var rect = el.getBoundingClientRect();
-                              if (rect.top <= 10 && rect.height > 15) {
-                                  var c = getComputedStyle(el).backgroundColor;
-                                  var hex = rgbToHex(c);
-                                  if (hex && c !== 'rgba(0,0,0,0)') return hex;
+                      function getTopColor(){
+                          var headers=document.querySelectorAll('header,nav,[class*="header"],[class*="navbar"],[role="banner"],.mdc-top-app-bar');
+                          for(var i=0;i<headers.length;i++){
+                              var el=headers[i], rect=el.getBoundingClientRect();
+                              if(rect.top<=10 && rect.height>15){
+                                  var c=getComputedStyle(el).backgroundColor, hex=rgbToHex(c);
+                                  if(hex && c!=='rgba(0,0,0,0)') return hex;
                               }
                           }
-                          var bodyC = getComputedStyle(document.body).backgroundColor;
-                          var bodyHex = rgbToHex(bodyC);
-                          if (bodyHex && bodyC !== 'rgba(0,0,0,0)') return bodyHex;
+                          var bodyC=getComputedStyle(document.body).backgroundColor, bodyHex=rgbToHex(bodyC);
+                          if(bodyHex && bodyC!=='rgba(0,0,0,0)') return bodyHex;
                           return null;
                       }
-                      
-                      function sendColor() {
-                          var color = getTopColor();
-                          if (color && color !== lastColor) {
-                              lastColor = color;
+                      function sendColor(){
+                          var color=getTopColor();
+                          if(color && color!==lastColor){
+                              lastColor=color;
                               window.webkit.messageHandlers.themeHandler.postMessage(color);
-                              retries = 0;
-                          } else if (!color && retries < maxRetries) {
+                              retries=0;
+                          } else if(!color && retries<maxRetries){
                               retries++;
-                              frame = requestAnimationFrame(sendColor);
+                              frame=requestAnimationFrame(sendColor);
                               return;
                           }
-                          frame = requestAnimationFrame(sendColor);
+                          frame=requestAnimationFrame(sendColor);
                       }
-                      
                       sendColor();
                   })();
                   """
-                  
                   let themeScript = WKUserScript(source: themeJS, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
                   config.userContentController.addUserScript(themeScript)
                   
@@ -349,8 +330,9 @@ jobs:
                   webView.scrollView.decelerationRate = .normal
                   view.addSubview(webView)
                   
+                  // FIXED: Use safeAreaLayoutGuide to prevent status bar overlap
                   NSLayoutConstraint.activate([
-                      webView.topAnchor.constraint(equalTo: view.topAnchor),
+                      webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
                       webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                       webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                       webView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -371,17 +353,12 @@ jobs:
                   if message.name == "themeHandler", let rgb = message.body as? String {
                       let parts = rgb.split(separator: ",").compactMap { Int($0) }
                       if parts.count == 3 {
-                          let R = CGFloat(parts[0]) / 255.0
-                          let G = CGFloat(parts[1]) / 255.0
-                          let B = CGFloat(parts[2]) / 255.0
-                          
+                          let R = CGFloat(parts[0])/255, G = CGFloat(parts[1])/255, B = CGFloat(parts[2])/255
                           UIView.animate(withDuration: 0.15) {
-                              self.view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
+                              self.view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1)
                           }
-                          
-                          let luminance = (0.299 * CGFloat(parts[0]) + 0.587 * CGFloat(parts[1]) + 0.114 * CGFloat(parts[2])) / 255.0
+                          let luminance = (0.299*CGFloat(parts[0]) + 0.587*CGFloat(parts[1]) + 0.114*CGFloat(parts[2]))/255
                           let newStyle = luminance < 0.45
-                          
                           if newStyle != self.statusBarStyle {
                               self.statusBarStyle = newStyle
                               self.setNeedsStatusBarAppearanceUpdate()
@@ -457,7 +434,6 @@ jobs:
 
           class AppDelegate: UIResponder, UIApplicationDelegate {
               var window: UIWindow?
-              
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
                   window = UIWindow(frame: UIScreen.main.bounds)
                   window?.rootViewController = ViewController()
@@ -476,32 +452,67 @@ jobs:
           xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/${APP_NAME}.app/${APP_NAME} app.swift
           chmod +x Payload/${APP_NAME}.app/${APP_NAME}
 
-      - name: Create Info.plist
+      - name: Create Info.plist with icon configuration
         run: |
           APP_NAME="Gemini"
           cat > Payload/${APP_NAME}.app/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>Gemini</string>
-          <key>CFBundleIdentifier</key><string>com.google.gemini</string>
-          <key>CFBundleName</key><string>Gemini</string>
-          <key>CFBundleDisplayName</key><string>Gemini</string>
-          <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleShortVersionString</key><string>1.0</string>
-          <key>CFBundleVersion</key><string>1</string>
-          <key>LSRequiresIPhoneOS</key><true/>
-          <key>MinimumOSVersion</key><string>15.0</string>
-          <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-          <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
-          <key>UIViewControllerBasedStatusBarAppearance</key><true/>
-          <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
-          <key>NSMicrophoneUsageDescription</key><string>Gemini needs microphone for voice input</string>
-          <key>NSCameraUsageDescription</key><string>Gemini needs camera for image uploads</string>
-          <key>NSLocationWhenInUseUsageDescription</key><string>Gemini needs location for AI features</string>
-          <key>NSPhotoLibraryUsageDescription</key><string>Gemini needs photo library for image uploads</string>
-          <key>UISupportsDocumentBrowser</key><true/>
-          </dict></plist>
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>Gemini</string>
+              <key>CFBundleIdentifier</key><string>com.google.gemini</string>
+              <key>CFBundleName</key><string>Gemini</string>
+              <key>CFBundleDisplayName</key><string>Gemini</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>CFBundleVersion</key><string>1</string>
+              <key>LSRequiresIPhoneOS</key><true/>
+              <key>MinimumOSVersion</key><string>15.0</string>
+              <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+              <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+              <key>NSMicrophoneUsageDescription</key><string>Gemini needs microphone for voice input</string>
+              <key>NSCameraUsageDescription</key><string>Gemini needs camera for image uploads</string>
+              <key>NSLocationWhenInUseUsageDescription</key><string>Gemini needs location for AI features</string>
+              <key>NSPhotoLibraryUsageDescription</key><string>Gemini needs photo library for image uploads</string>
+              <key>UISupportsDocumentBrowser</key><true/>
+              <key>CFBundleIcons</key>
+              <dict>
+                  <key>CFBundlePrimaryIcon</key>
+                  <dict>
+                      <key>CFBundleIconFiles</key>
+                      <array>
+                          <string>Icon-60</string>
+                          <string>Icon-76</string>
+                          <string>Icon-40</string>
+                      </array>
+                      <key>CFBundleIconName</key>
+                      <string>AppIcon</string>
+                  </dict>
+              </dict>
+              <key>CFBundleIcons~ipad</key>
+              <dict>
+                  <key>CFBundlePrimaryIcon</key>
+                  <dict>
+                      <key>CFBundleIconFiles</key>
+                      <array>
+                          <string>Icon-60</string>
+                          <string>Icon-76</string>
+                          <string>Icon-40</string>
+                      </array>
+                      <key>CFBundleIconName</key>
+                      <string>AppIcon</string>
+                  </dict>
+              </dict>
+          </dict>
+          </plist>
           PLIST
 
       - name: Create PkgInfo
@@ -517,5 +528,5 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Gemini-Optimized
+          name: Gemini-with-Icon
           path: Gemini.ipa
