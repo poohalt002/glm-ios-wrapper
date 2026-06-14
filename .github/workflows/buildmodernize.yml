@@ -1,0 +1,831 @@
+name: Build Modernize Browser
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create patch files
+        run: |
+          mkdir -p patches
+          
+          cat > patches/polyfills.js << 'POLYFILLS_EOF'
+          (function(w){
+            function getProto() {
+              if (w.MediaQueryList) return w.MediaQueryList.prototype;
+              if (typeof w.matchMedia === "function") {
+                var mql = w.matchMedia("all");
+                return Object.getPrototypeOf(mql);
+              }
+            }
+            var proto = getProto();
+            if (!proto) return;
+            var wrappers = new WeakMap();
+            proto.addEventListener = proto.addEventListener || function(type, listener) {
+              if (type !== "change") return;
+              if (typeof listener === "function") {
+                proto.addListener.call(this, listener);
+              } else {
+                var wrapper = wrappers.get(listener);
+                if (!wrapper) {
+                  wrapper = function(ev) { listener.handleEvent(ev); };
+                  wrappers.set(listener, wrapper);
+                }
+                proto.addListener.call(this, wrapper);
+              }
+            };
+            proto.removeEventListener = proto.removeEventListener || function(type, listener) {
+              if (type !== "change") return;
+              if (typeof listener === "function") {
+                proto.removeListener.call(this, listener);
+              } else {
+                var wrapper = wrappers.get(listener);
+                if (!wrapper) return;
+                proto.removeListener.call(this, wrapper);
+              }
+            };
+          })(window);
+          
+          if (!window.queueMicrotask) {
+            window.queueMicrotask = function(callback) { Promise.resolve().then(callback); };
+          }
+          
+          if (!Promise.withResolvers) {
+            Promise.withResolvers = function() {
+              var resolve, reject;
+              var promise = new Promise(function(res, rej) { resolve = res; reject = rej; });
+              return { promise: promise, resolve: resolve, reject: reject };
+            };
+          }
+          
+          if (!Array.prototype.at) {
+            Array.prototype.at = function(index) {
+              var length = this.length;
+              var relativeIndex = index >= 0 ? index : length + index;
+              if (relativeIndex < 0 || relativeIndex >= length) return undefined;
+              return this[relativeIndex];
+            };
+          }
+          
+          if (!String.prototype.at) {
+            String.prototype.at = function(index) {
+              var length = this.length;
+              var relativeIndex = index >= 0 ? index : length + index;
+              if (relativeIndex < 0 || relativeIndex >= length) return undefined;
+              return this[relativeIndex];
+            };
+          }
+          
+          if (!Object.hasOwn) {
+            Object.hasOwn = function(obj, prop) {
+              return Object.prototype.hasOwnProperty.call(obj, prop);
+            };
+          }
+          
+          if (!Promise.any) {
+            Promise.any = function(promises) {
+              return new Promise(function(resolve, reject) {
+                var errors = [];
+                var pending = promises.length;
+                if (pending === 0) {
+                  reject(new AggregateError([], "All promises were rejected"));
+                  return;
+                }
+                for (var i = 0; i < promises.length; i++) {
+                  Promise.resolve(promises[i]).then(resolve, function(err) {
+                    errors[i] = err;
+                    pending--;
+                    if (pending === 0) {
+                      reject(new AggregateError(errors, "All promises were rejected"));
+                    }
+                  });
+                }
+              });
+            };
+          }
+          
+          if (!String.prototype.replaceAll) {
+            String.prototype.replaceAll = function(search, replacement) {
+              if (typeof search === "string") {
+                return this.split(search).join(replacement);
+              }
+              if (search instanceof RegExp) {
+                if (!search.global) {
+                  throw new TypeError("replaceAll must be called with a global RegExp");
+                }
+                return this.replace(search, replacement);
+              }
+              return this.replace(search, replacement);
+            };
+          }
+          
+          if (typeof AggregateError === "undefined") {
+            window.AggregateError = function AggregateError(errors, message) {
+              var e = new Error(message);
+              e.errors = errors;
+              e.name = "AggregateError";
+              return e;
+            };
+          }
+          POLYFILLS_EOF
+          
+          cat > patches/loader.js << 'LOADER_EOF'
+          (function() {
+            var iosMatch = navigator.userAgent.match(/OS (\d+)_(\d+)/);
+            var iosVersion = iosMatch ? iosMatch[1] + "." + iosMatch[2] : "15.0";
+            
+            if (typeof window.LegacyTranspiler === "undefined") {
+              return;
+            }
+            
+            window.LegacyTranspiler.init({
+              BASE_URL: window.location.origin,
+              runScript: function(code) {
+                try {
+                  var script = document.createElement("script");
+                  script.textContent = code;
+                  document.documentElement.appendChild(script);
+                  script.remove();
+                } catch(e) {}
+              },
+              target: { platform: "iOS", version: iosVersion },
+              minify: true
+            });
+            
+            var processedScripts = new Set();
+            var observer = new MutationObserver(function(mutations) {
+              for (var i = 0; i < mutations.length; i++) {
+                var mutation = mutations[i];
+                for (var j = 0; j < mutation.addedNodes.length; j++) {
+                  var node = mutation.addedNodes[j];
+                  if (node.tagName === "SCRIPT" && node.src && !processedScripts.has(node.src)) {
+                    processedScripts.add(node.src);
+                    node.type = "javascript/blocked";
+                    window.LegacyTranspiler.loadCode(node.src);
+                  }
+                  if (node.tagName === "SCRIPT" && !node.src && node.textContent && node.type !== "javascript/blocked") {
+                    var content = node.textContent;
+                    if (/(\?\?=?|&&=?|\|\|=?|class\s+\w+\s*\{|\#\w+|\basync\b|import\s*\()/g.test(content)) {
+                      node.type = "javascript/blocked";
+                      try {
+                        var transpiled = window.LegacyTranspiler.transpile("inline.js", content);
+                        var newScript = document.createElement("script");
+                        newScript.textContent = transpiled;
+                        node.parentNode.replaceChild(newScript, node);
+                      } catch(e) {}
+                    }
+                  }
+                }
+              }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+          })();
+          LOADER_EOF
+          
+          echo "Patches created"
+
+      - name: Create app structure
+        run: |
+          APP_NAME="Modernize"
+          mkdir -p Payload/${APP_NAME}.app
+          cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || true
+
+      - name: Generate Swift browser source
+        run: |
+          cat > app.swift << 'SWIFT'
+          import UIKit
+          import WebKit
+          import AVFoundation
+
+          // MARK: - Browser View Controller
+          class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate, UITextFieldDelegate {
+              
+              // MARK: - Properties
+              var webView: WKWebView!
+              var bottomToolbar: UIView!
+              var urlTextField: UITextField!
+              var backButton: UIButton!
+              var forwardButton: UIButton!
+              var reloadButton: UIButton!
+              var shareButton: UIButton!
+              var bookmarksButton: UIButton!
+              var progressView: UIProgressView!
+              
+              var bookmarks: [[String: String]] = []
+              var history: [[String: String]] = []
+              
+              var currentDownload: WKDownload?
+              var currentDownloadDestinationURL: URL?
+              
+              // Custom user agents for specific domains
+              let defaultUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+              let googleAccountsUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+              
+              // MARK: - Lifecycle
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  view.backgroundColor = UIColor.systemBackground
+                  
+                  loadBookmarks()
+                  loadHistory()
+                  setupWebView()
+                  setupBottomToolbar()
+                  setupConstraints()
+                  setupKeyboardHandling()
+                  
+                  // Load start page
+                  if let url = URL(string: "https://www.google.com") {
+                      loadURL(url)
+                  }
+              }
+              
+              override func viewWillAppear(_ animated: Bool) {
+                  super.viewWillAppear(animated)
+                  navigationController?.setNavigationBarHidden(true, animated: false)
+                  updateAddressBar()
+              }
+              
+              // MARK: - Setup
+              func setupWebView() {
+                  let config = WKWebViewConfiguration()
+                  config.userContentController.add(self, name: "themeHandler")
+                  config.allowsInlineMediaPlayback = true
+                  config.mediaTypesRequiringUserActionForPlayback = []
+                  
+                  // Load JS patches
+                  let bundle = Bundle.main
+                  let patchFiles = ["polyfills", "loader"]
+                  for file in patchFiles {
+                      if let path = bundle.path(forResource: file, ofType: "js"),
+                         let js = try? String(contentsOfFile: path, encoding: .utf8) {
+                          let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                          config.userContentController.addUserScript(script)
+                      }
+                  }
+                  
+                  if let path = bundle.path(forResource: "legacy-transpiler", ofType: "js"),
+                     let js = try? String(contentsOfFile: path, encoding: .utf8) {
+                      let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                      config.userContentController.addUserScript(script)
+                  }
+                  
+                  webView = WKWebView(frame: .zero, configuration: config)
+                  webView.translatesAutoresizingMaskIntoConstraints = false
+                  webView.navigationDelegate = self
+                  webView.uiDelegate = self
+                  webView.allowsBackForwardNavigationGestures = true
+                  
+                  // Set initial user agent
+                  updateUserAgentForURL(nil)
+                  
+                  view.addSubview(webView)
+                  
+                  // Add progress view
+                  progressView = UIProgressView(progressViewStyle: .bar)
+                  progressView.translatesAutoresizingMaskIntoConstraints = false
+                  progressView.progressTintColor = UIColor.systemBlue
+                  progressView.trackTintColor = UIColor.lightGray
+                  view.addSubview(progressView)
+                  
+                  // Observe loading progress
+                  webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: .new, context: nil)
+                  webView.addObserver(self, forKeyPath: #keyPath(WKWebView.isLoading), options: .new, context: nil)
+                  webView.addObserver(self, forKeyPath: #keyPath(WKWebView.url), options: .new, context: nil)
+              }
+              
+              func setupBottomToolbar() {
+                  bottomToolbar = UIView()
+                  bottomToolbar.translatesAutoresizingMaskIntoConstraints = false
+                  bottomToolbar.backgroundColor = UIColor.systemBackground
+                  bottomToolbar.layer.shadowColor = UIColor.black.cgColor
+                  bottomToolbar.layer.shadowOffset = CGSize(width: 0, height: -2)
+                  bottomToolbar.layer.shadowOpacity = 0.1
+                  bottomToolbar.layer.shadowRadius = 4
+                  view.addSubview(bottomToolbar)
+                  
+                  // URL Text Field
+                  urlTextField = UITextField()
+                  urlTextField.translatesAutoresizingMaskIntoConstraints = false
+                  urlTextField.placeholder = "Search or enter URL"
+                  urlTextField.borderStyle = .roundedRect
+                  urlTextField.autocapitalizationType = .none
+                  urlTextField.autocorrectionType = .no
+                  urlTextField.keyboardType = .URL
+                  urlTextField.returnKeyType = .go
+                  urlTextField.delegate = self
+                  urlTextField.clearButtonMode = .whileEditing
+                  urlTextField.font = UIFont.systemFont(ofSize: 14)
+                  bottomToolbar.addSubview(urlTextField)
+                  
+                  // Button stack
+                  let buttonStack = UIStackView()
+                  buttonStack.translatesAutoresizingMaskIntoConstraints = false
+                  buttonStack.axis = .horizontal
+                  buttonStack.distribution = .equalSpacing
+                  buttonStack.alignment = .center
+                  buttonStack.spacing = 20
+                  bottomToolbar.addSubview(buttonStack)
+                  
+                  // Back button
+                  backButton = UIButton(type: .system)
+                  backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+                  backButton.addTarget(self, action: #selector(goBack), for: .touchUpInside)
+                  buttonStack.addArrangedSubview(backButton)
+                  
+                  // Forward button
+                  forwardButton = UIButton(type: .system)
+                  forwardButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
+                  forwardButton.addTarget(self, action: #selector(goForward), for: .touchUpInside)
+                  buttonStack.addArrangedSubview(forwardButton)
+                  
+                  // Reload button
+                  reloadButton = UIButton(type: .system)
+                  reloadButton.setImage(UIImage(systemName: "arrow.clockwise"), for: .normal)
+                  reloadButton.addTarget(self, action: #selector(reload), for: .touchUpInside)
+                  buttonStack.addArrangedSubview(reloadButton)
+                  
+                  // Share button
+                  shareButton = UIButton(type: .system)
+                  shareButton.setImage(UIImage(systemName: "square.and.arrow.up"), for: .normal)
+                  shareButton.addTarget(self, action: #selector(sharePage), for: .touchUpInside)
+                  buttonStack.addArrangedSubview(shareButton)
+                  
+                  // Bookmarks button
+                  bookmarksButton = UIButton(type: .system)
+                  bookmarksButton.setImage(UIImage(systemName: "bookmark"), for: .normal)
+                  bookmarksButton.addTarget(self, action: #selector(showBookmarks), for: .touchUpInside)
+                  buttonStack.addArrangedSubview(bookmarksButton)
+                  
+                  NSLayoutConstraint.activate([
+                      buttonStack.leadingAnchor.constraint(equalTo: bottomToolbar.leadingAnchor, constant: 16),
+                      buttonStack.trailingAnchor.constraint(equalTo: bottomToolbar.trailingAnchor, constant: -16),
+                      buttonStack.topAnchor.constraint(equalTo: bottomToolbar.topAnchor, constant: 8),
+                      buttonStack.heightAnchor.constraint(equalToConstant: 44),
+                      
+                      urlTextField.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 4),
+                      urlTextField.leadingAnchor.constraint(equalTo: bottomToolbar.leadingAnchor, constant: 16),
+                      urlTextField.trailingAnchor.constraint(equalTo: bottomToolbar.trailingAnchor, constant: -16),
+                      urlTextField.heightAnchor.constraint(equalToConstant: 36),
+                      urlTextField.bottomAnchor.constraint(equalTo: bottomToolbar.bottomAnchor, constant: -8)
+                  ])
+              }
+              
+              func setupConstraints() {
+                  let safeArea = view.safeAreaLayoutGuide
+                  
+                  NSLayoutConstraint.activate([
+                      webView.topAnchor.constraint(equalTo: view.topAnchor),
+                      webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                      webView.bottomAnchor.constraint(equalTo: bottomToolbar.topAnchor),
+                      
+                      progressView.topAnchor.constraint(equalTo: webView.bottomAnchor),
+                      progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                      progressView.heightAnchor.constraint(equalToConstant: 2),
+                      
+                      bottomToolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      bottomToolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                      bottomToolbar.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
+                      bottomToolbar.heightAnchor.constraint(equalToConstant: 100)
+                  ])
+              }
+              
+              func setupKeyboardHandling() {
+                  let tapGesture = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
+                  tapGesture.cancelsTouchesInView = false
+                  webView.addGestureRecognizer(tapGesture)
+              }
+              
+              @objc func dismissKeyboard() {
+                  urlTextField.resignFirstResponder()
+              }
+              
+              // MARK: - User Agent Management
+              func updateUserAgentForURL(_ url: URL?) {
+                  guard let url = url else {
+                      webView.customUserAgent = defaultUserAgent
+                      return
+                  }
+                  
+                  if url.host?.contains("accounts.google.com") == true || url.host?.contains("google.com") == true {
+                      webView.customUserAgent = googleAccountsUserAgent
+                  } else {
+                      webView.customUserAgent = defaultUserAgent
+                  }
+              }
+              
+              // MARK: - Navigation
+              func loadURL(_ url: URL) {
+                  updateUserAgentForURL(url)
+                  let request = URLRequest(url: url)
+                  webView.load(request)
+                  updateAddressBar()
+              }
+              
+              func loadSearch(_ query: String) {
+                  let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+                  if let url = URL(string: "https://www.google.com/search?q=\(encodedQuery)") {
+                      loadURL(url)
+                  }
+              }
+              
+              @objc func goBack() {
+                  if webView.canGoBack {
+                      webView.goBack()
+                  }
+              }
+              
+              @objc func goForward() {
+                  if webView.canGoForward {
+                      webView.goForward()
+                  }
+              }
+              
+              @objc func reload() {
+                  if webView.isLoading {
+                      webView.stopLoading()
+                  }
+                  webView.reload()
+              }
+              
+              @objc func sharePage() {
+                  guard let url = webView.url, let title = webView.title else { return }
+                  let items: [Any] = [title, url]
+                  let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+                  present(activityVC, animated: true)
+              }
+              
+              // MARK: - Address Bar
+              func updateAddressBar() {
+                  if let url = webView.url, url.scheme != "about" {
+                      urlTextField.text = url.absoluteString
+                  }
+                  backButton.isEnabled = webView.canGoBack
+                  forwardButton.isEnabled = webView.canGoForward
+              }
+              
+              // MARK: - UITextFieldDelegate
+              func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+                  textField.resignFirstResponder()
+                  
+                  guard let text = textField.text, !text.isEmpty else { return true }
+                  
+                  if text.hasPrefix("http://") || text.hasPrefix("https://") {
+                      if let url = URL(string: text) {
+                          loadURL(url)
+                      }
+                  } else if text.contains(".") && !text.contains(" ") {
+                      let urlString = "https://\(text)"
+                      if let url = URL(string: urlString) {
+                          loadURL(url)
+                      }
+                  } else {
+                      loadSearch(text)
+                  }
+                  
+                  return true
+              }
+              
+              // MARK: - Bookmarks
+              @objc func showBookmarks() {
+                  let alert = UIAlertController(title: "Bookmarks & History", message: nil, preferredStyle: .actionSheet)
+                  
+                  alert.addAction(UIAlertAction(title: "View Bookmarks", style: .default) { _ in
+                      self.showBookmarksList()
+                  })
+                  
+                  alert.addAction(UIAlertAction(title: "Add Current Page to Bookmarks", style: .default) { _ in
+                      self.addCurrentPageToBookmarks()
+                  })
+                  
+                  alert.addAction(UIAlertAction(title: "View History", style: .default) { _ in
+                      self.showHistoryList()
+                  })
+                  
+                  alert.addAction(UIAlertAction(title: "Clear History", style: .destructive) { _ in
+                      self.clearHistory()
+                  })
+                  
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                  
+                  if let popover = alert.popoverPresentationController {
+                      popover.sourceView = bookmarksButton
+                      popover.sourceRect = bookmarksButton.bounds
+                  }
+                  
+                  present(alert, animated: true)
+              }
+              
+              func addCurrentPageToBookmarks() {
+                  guard let url = webView.url, let title = webView.title else { return }
+                  
+                  let bookmark = ["title": title, "url": url.absoluteString]
+                  bookmarks.append(bookmark)
+                  saveBookmarks()
+                  
+                  let alert = UIAlertController(title: "Bookmarked", message: "\(title) added to bookmarks", preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "OK", style: .default))
+                  present(alert, animated: true)
+              }
+              
+              func showBookmarksList() {
+                  let listVC = UITableViewController()
+                  listVC.title = "Bookmarks"
+                  
+                  var items: [(title: String, url: String)] = bookmarks.compactMap { 
+                      guard let t = $0["title"], let u = $0["url"] else { return nil }
+                      return (t, u)
+                  }
+                  
+                  listVC.tableView.dataSource = items as? any UITableViewDataSource
+                  listVC.tableView.delegate = items as? any UITableViewDelegate
+                  
+                  // Simple implementation
+                  let alert = UIAlertController(title: "Bookmarks", message: nil, preferredStyle: .actionSheet)
+                  for bookmark in bookmarks {
+                      if let title = bookmark["title"], let urlString = bookmark["url"], let url = URL(string: urlString) {
+                          alert.addAction(UIAlertAction(title: title, style: .default) { _ in
+                              self.loadURL(url)
+                          })
+                      }
+                  }
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                  present(alert, animated: true)
+              }
+              
+              func showHistoryList() {
+                  let alert = UIAlertController(title: "History", message: nil, preferredStyle: .actionSheet)
+                  for entry in history.reversed().prefix(20) {
+                      if let title = entry["title"], let urlString = entry["url"], let url = URL(string: urlString) {
+                          alert.addAction(UIAlertAction(title: title, style: .default) { _ in
+                              self.loadURL(url)
+                          })
+                      }
+                  }
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                  present(alert, animated: true)
+              }
+              
+              func addToHistory(url: URL, title: String) {
+                  let entry = ["url": url.absoluteString, "title": title, "date": Date().timeIntervalSince1970.description]
+                  history.append(entry)
+                  if history.count > 100 {
+                      history.removeFirst(20)
+                  }
+                  saveHistory()
+              }
+              
+              func clearHistory() {
+                  history.removeAll()
+                  saveHistory()
+              }
+              
+              // MARK: - Persistence
+              func saveBookmarks() {
+                  UserDefaults.standard.set(bookmarks, forKey: "bookmarks")
+              }
+              
+              func loadBookmarks() {
+                  bookmarks = UserDefaults.standard.array(forKey: "bookmarks") as? [[String: String]] ?? []
+              }
+              
+              func saveHistory() {
+                  UserDefaults.standard.set(history, forKey: "history")
+              }
+              
+              func loadHistory() {
+                  history = UserDefaults.standard.array(forKey: "history") as? [[String: String]] ?? []
+              }
+              
+              // MARK: - WKNavigationDelegate
+              func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+                  updateAddressBar()
+                  updateUserAgentForURL(webView.url)
+              }
+              
+              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                  updateAddressBar()
+                  if let url = webView.url, let title = webView.title, url.scheme != "about" {
+                      addToHistory(url: url, title: title)
+                  }
+                  
+                  // Inject theme detection
+                  let themeJS = """
+                  (function() {
+                      function getTopColor() {
+                          var selectors = ['header','nav','[class*=header]','[class*=navbar]','[class*=toolbar]'];
+                          for (var i=0; i<selectors.length; i++) {
+                              var el = document.querySelector(selectors[i]);
+                              if (el) {
+                                  var rect = el.getBoundingClientRect();
+                                  if (rect.top <= 10 && rect.height > 20) {
+                                      var c = getComputedStyle(el).backgroundColor;
+                                      var m = c.match(/(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
+                                      if (m && c !== 'rgba(0,0,0,0)') return m[1]+','+m[2]+','+m[3];
+                                  }
+                              }
+                          }
+                          return '255,255,255';
+                      }
+                      function sendColor() {
+                          window.webkit.messageHandlers.themeHandler.postMessage(getTopColor());
+                      }
+                      sendColor();
+                      setInterval(sendColor, 1000);
+                  })();
+                  """
+                  webView.evaluateJavaScript(themeJS)
+              }
+              
+              func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+                  print("Navigation error: \(error.localizedDescription)")
+              }
+              
+              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                  if let url = navigationAction.request.url {
+                      updateUserAgentForURL(url)
+                  }
+                  decisionHandler(.allow)
+              }
+              
+              // MARK: - WKDownloadDelegate
+              func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+                  if let mimeType = navigationResponse.response.mimeType,
+                     mimeType != "text/html" && !mimeType.hasPrefix("text/") && !mimeType.hasPrefix("application/json") {
+                      decisionHandler(.download)
+                  } else {
+                      decisionHandler(.allow)
+                  }
+              }
+              
+              func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+                  currentDownload = download
+                  download.delegate = self
+              }
+              
+              func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+                  currentDownload = download
+                  download.delegate = self
+              }
+              
+              func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+                  let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                  let destinationURL = docsURL.appendingPathComponent(suggestedFilename)
+                  currentDownloadDestinationURL = destinationURL
+                  completionHandler(destinationURL)
+              }
+              
+              func downloadDidFinish(_ download: WKDownload) {
+                  guard let url = currentDownloadDestinationURL else { return }
+                  
+                  DispatchQueue.main.async {
+                      let alert = UIAlertController(title: "Download Complete", message: "File saved to Documents", preferredStyle: .alert)
+                      alert.addAction(UIAlertAction(title: "OK", style: .default))
+                      self.present(alert, animated: true)
+                  }
+                  
+                  currentDownload = nil
+                  currentDownloadDestinationURL = nil
+              }
+              
+              func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+                  print("Download failed: \(error.localizedDescription)")
+                  currentDownload = nil
+                  currentDownloadDestinationURL = nil
+              }
+              
+              // MARK: - WKUIDelegate
+              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  if navigationAction.targetFrame == nil {
+                      webView.load(navigationAction.request)
+                  }
+                  return nil
+              }
+              
+              func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+                  let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+                  present(alert, animated: true)
+              }
+              
+              func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+                  let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
+                  present(alert, animated: true)
+              }
+              
+              func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+                  let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+                  alert.addTextField { $0.text = defaultText }
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(alert.textFields?.first?.text) })
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
+                  present(alert, animated: true)
+              }
+              
+              // MARK: - WKScriptMessageHandler
+              func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+                  if message.name == "themeHandler", let rgb = message.body as? String {
+                      let parts = rgb.split(separator: ",").compactMap { Int($0) }
+                      if parts.count == 3 {
+                          let R = CGFloat(parts[0])/255.0
+                          let G = CGFloat(parts[1])/255.0
+                          let B = CGFloat(parts[2])/255.0
+                          view.backgroundColor = UIColor(red: R, green: G, blue: B, alpha: 1.0)
+                      }
+                  }
+              }
+              
+              // MARK: - KVO
+              override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+                  if keyPath == #keyPath(WKWebView.estimatedProgress) {
+                      progressView.progress = Float(webView.estimatedProgress)
+                      progressView.isHidden = webView.estimatedProgress >= 1.0
+                  } else if keyPath == #keyPath(WKWebView.isLoading) {
+                      let icon = webView.isLoading ? "xmark.circle" : "arrow.clockwise"
+                      reloadButton.setImage(UIImage(systemName: icon), for: .normal)
+                  } else if keyPath == #keyPath(WKWebView.url) {
+                      updateAddressBar()
+                  }
+              }
+              
+              deinit {
+                  webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+                  webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.isLoading))
+                  webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.url))
+              }
+          }
+
+          // MARK: - App Delegate
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = BrowserViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+
+          UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AppDelegate.self))
+          SWIFT
+
+      - name: Compile Swift
+        run: |
+          APP_NAME="Modernize"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos swiftc -target arm64-apple-ios15.0 -framework UIKit -framework WebKit -framework AVFoundation -o Payload/${APP_NAME}.app/${APP_NAME} app.swift
+          chmod +x Payload/${APP_NAME}.app/${APP_NAME}
+
+      - name: Create Info.plist
+        run: |
+          APP_NAME="Modernize"
+          cat > Payload/${APP_NAME}.app/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>Modernize</string>
+          <key>CFBundleIdentifier</key><string>com.modernize.browser</string>
+          <key>CFBundleName</key><string>Modernize</string>
+          <key>CFBundleDisplayName</key><string>Modernize</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>LSRequiresIPhoneOS</key><true/>
+          <key>MinimumOSVersion</key><string>15.0</string>
+          <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+          <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+          <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+          <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+          <key>NSMicrophoneUsageDescription</key><string>Modernize needs microphone for web input</string>
+          <key>NSCameraUsageDescription</key><string>Modernize needs camera for web input</string>
+          <key>NSLocationWhenInUseUsageDescription</key><string>Modernize needs location for web services</string>
+          <key>NSPhotoLibraryUsageDescription</key><string>Modernize needs photo library for uploads</string>
+          <key>UISupportsDocumentBrowser</key><true/>
+          <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+          </dict></plist>
+          PLIST
+
+      - name: Create PkgInfo
+        run: |
+          APP_NAME="Modernize"
+          printf 'APPL????' > Payload/${APP_NAME}.app/PkgInfo
+
+      - name: Create IPA
+        run: |
+          APP_NAME="Modernize"
+          zip -r ${APP_NAME}.ipa Payload/
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Modernize-Browser
+          path: Modernize.ipa
