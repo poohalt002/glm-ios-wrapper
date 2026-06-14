@@ -1,4 +1,3 @@
-# FILE: .github/workflows/build.yml
 name: Build Chat Z.AI for iOS 15.8
 
 on:
@@ -8,7 +7,6 @@ on:
         description: 'Enable debug console overlay'
         type: boolean
         default: true
-        required: false
 
 jobs:
   build:
@@ -18,12 +16,38 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # DEBUG: Show what files exist in the repo
+      - name: List all files in repository
+        run: |
+          echo "=== Current directory ==="
+          pwd
+          echo "=== Full file list ==="
+          find . -type f -name "*.js" 2>/dev/null || echo "No JS files found"
+          echo "=== Patches folder contents ==="
+          ls -la patches/ 2>/dev/null || echo "patches folder not found!"
+
       - name: Create app structure
         run: |
-          set -ex
           APP_NAME="ChatZAI"
           mkdir -p Payload/${APP_NAME}.app
-          cp patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || echo "No patches found"
+          
+          # Copy patches using multiple methods to ensure it works
+          echo "=== Copying patches ==="
+          
+          # Method 1: Direct copy
+          if [ -d "patches" ]; then
+            cp -v patches/*.js Payload/${APP_NAME}.app/ 2>/dev/null || echo "No JS files in patches/"
+          else
+            echo "patches directory not found at root"
+          fi
+          
+          # Method 2: Try with full path
+          if [ -f "${GITHUB_WORKSPACE}/patches/legacy-transpiler.js" ]; then
+            cp -v ${GITHUB_WORKSPACE}/patches/*.js Payload/${APP_NAME}.app/
+          fi
+          
+          echo "=== Files in app bundle after copy ==="
+          ls -la Payload/${APP_NAME}.app/*.js 2>/dev/null || echo "NO JS FILES IN BUNDLE!"
 
       - name: Generate Swift source
         run: |
@@ -34,10 +58,8 @@ jobs:
 
           class ViewController: UIViewController, WKScriptMessageHandler, WKUIDelegate {
               var webView: WKWebView!
-              var lastColor = "255,255,255"
-              var stableCount = 0
               var statusBarStyle = false
-              var debugMode = ${{ github.event.inputs.debug_mode == 'true' }}
+              var debugMode = ${{ github.event.inputs.debug_mode == true }}
 
               override var preferredStatusBarStyle: UIStatusBarStyle {
                   return statusBarStyle ? .lightContent : .darkContent
@@ -61,9 +83,9 @@ jobs:
                          let js = try? String(contentsOfFile: path, encoding: .utf8) {
                           let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
                           config.userContentController.addUserScript(script)
-                          print("Loaded: \(file).js")
+                          print("✅ Loaded: \(file).js")
                       } else {
-                          print("Warning: \(file).js not found")
+                          print("❌ Missing: \(file).js")
                       }
                   }
                   
